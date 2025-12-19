@@ -1,0 +1,7 @@
+python main.py
+
+tree -L 2 --dirsfirst --noreport
+
+git add .
+git commit -m "Describe your changes here"
+git push
