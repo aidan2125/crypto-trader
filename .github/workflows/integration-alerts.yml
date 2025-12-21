@@ -1,0 +1,56 @@
+name: Integration - Alerts (manual)
+
+# This workflow is intended to run real alert integration tests which use
+# secrets (webhook URLs, API keys). It is deliberately manual and uses a
+# GitHub Environment to protect access to secrets.
+#
+# Setup instructions (one-time):
+# 1. In your repository settings > Environments, create a new environment
+#    named `alerts` (or another name you prefer).
+# 2. In that environment, add the secret `DISCORD_WEBHOOK_URL` (do NOT
+#    commit secrets to the repo). Configure environment protection rules
+#    (e.g. required reviewers) so that only approved users can approve
+#    workflows which access the secret.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  run-alert-integration:
+    runs-on: ubuntu-latest
+    environment: alerts
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      - name: Run Discord integration test (real send)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          try:
+              from alerts import discord_alerts
+          except Exception as e:
+              print('Failed to import alerts.discord_alerts:', e)
+              raise
+          webhook = os.getenv('DISCORD_WEBHOOK_URL')
+          if not webhook:
+              raise SystemExit('DISCORD_WEBHOOK_URL not set')
+          ok = discord_alerts.send_discord_message('Integration test alert from CI')
+          print('send_discord_message returned:', ok)
+          if not ok:
+              raise SystemExit('Discord send returned False')
+          PY
+
+# Security notes:
+# - The job references the `alerts` environment so GitHub will require any
+#   environment-level approvals before the job can access the `DISCORD_WEBHOOK_URL` secret.
+# - Do not add secrets to the repository; instead use the repository's
+#   Settings > Secrets > Environments and add them there.
