@@ -3,20 +3,7 @@ import os
 from datetime import datetime
 from utils.currency import SUPPORTED_CURRENCIES
 import json
-
-
-from risk.risk_management import (
-    load_risk_config,
-    save_risk_config,
-    calculate_position_size,
-    check_max_positions,
-    calculate_fees_and_slippage,
-    calculate_stop_loss,
-    calculate_take_profit,
-    check_exit_conditions,
-    update_peak_price
-)
-
+from execution.paper_trader import load_json, BALANCE_FILE, POSITIONS_FILE
 
 # File paths
 BALANCE_FILE = "data/paper_balance.json"

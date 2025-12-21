@@ -1,0 +1,15 @@
+{
+    "BTC/USDT": {
+        "trades": 2,
+        "total_pnl": 6.458333333333334
+    },
+    "total_pnl": 51.458333333333336,
+    "ETH/USDT": {
+        "trades": 1,
+        "total_pnl": -5.0
+    },
+    "SOL/USDT": {
+        "trades": 1,
+        "total_pnl": 50.0
+    }
+}
