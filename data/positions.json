@@ -1,1 +1,16 @@
-{}
+{
+    "BTC/USDT": {
+        "entry_price": 88340.33,
+        "entry_time": "2025-12-21T19:37:23.303905",
+        "currency": "USD",
+        "trade_size": 100,
+        "peak_price": 88440.93
+    },
+    "ETH/USDT": {
+        "entry_price": 2985.75,
+        "entry_time": "2025-12-21T19:37:26.860897",
+        "currency": "USD",
+        "trade_size": 100,
+        "peak_price": 2993.31
+    }
+}
