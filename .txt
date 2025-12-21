@@ -17,6 +17,11 @@ Show Last Run Output: journalctl --user -u crypto-trader-test.service --no-pager
 
 Force Immediate Rotation: sudo logrotate -v /etc/logrotate.d/crypto_trader_test — run log rotation now (verbose).
 
+Tail the log live: tail -f logs/simulation_continuous.log (I can stream it here).
+Stop the run: pkill -f run_continuous.sh or kill 24871.
+
+
+
 
 python3 test_paper_trader.py
 
