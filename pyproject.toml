@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools >= 61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-trader"
+version = "0.1.0"
+dependencies = []  # Add real dependencies later, e.g. ["pandas", "ccxt"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+dependencies = ["pandas", "requests", "ccxt"]

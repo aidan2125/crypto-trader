@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime
-from utils.currency import SUPPORTED_CURRENCIES
+from utils import SUPPORTED_CURRENCIES
 import json
 from execution.paper_trader import load_json, BALANCE_FILE, POSITIONS_FILE
 

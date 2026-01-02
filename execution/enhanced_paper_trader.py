@@ -1,25 +1,24 @@
+# execution/enhanced_paper_trader.py
+
 import json
 import os
+import csv
 from datetime import datetime
-from utils.currency import SUPPORTED_CURRENCIES
+from utils import SUPPORTED_CURRENCIES
 
-# Import risk management functions
+# === Dynamic Risk Management Only ===
 try:
-    from risk.risk_management import (
-        load_risk_config,
-        save_risk_config,
-        calculate_position_size,
-        check_max_positions,
+    from risk.dynamic_risk import (
+        load_enhanced_risk_config as load_config,
+        save_enhanced_risk_config as save_config,
+        calculate_dynamic_sl_tp,
+        calculate_position_size_with_risk as calc_position_size,
         calculate_fees_and_slippage,
-        calculate_stop_loss,
-        calculate_take_profit,
-        check_exit_conditions,
-        update_peak_price,
-        DEFAULT_RISK_CONFIG
+        check_max_positions,
+        ENHANCED_RISK_CONFIG
     )
 except ImportError as e:
-    print(f"ERROR: Failed to import risk management module: {e}")
-    print("Please ensure risk/risk_management.py exists")
+    print(f"Risk module import error: {e}")
     raise
 
 # File paths
@@ -27,164 +26,143 @@ BALANCE_FILE = "data/paper_balance.json"
 POSITIONS_FILE = "data/positions.json"
 TRADES_LOG = "logs/paper_trades.log"
 SUMMARY_FILE = "data/paper_summary.json"
+CSV_FILE = "logs/paper_trades.csv"
 
 # Default balances
 DEFAULT_BALANCES = {
-    "USD": {"cash": 1000},
-    "ZAR": {"cash": 18500}
+    "USD": {"cash": 1000.0},
+    "ZAR": {"cash": 18500.0}  # ~1000 USD
 }
 
-# Ensure directories exist
+# ZAR to USD rate
+ZAR_TO_USD_RATE = 1 / 18.5
+
+# Ensure dirs
 os.makedirs("data", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
-# ------------------- Utility functions -------------------
 
+# ------------------- Utils -------------------
 def load_json(file_path, default=None):
-    """Load JSON file with error handling."""
     if not os.path.exists(file_path):
         return default if default is not None else {}
-    with open(file_path, "r") as f:
-        try:
+    try:
+        with open(file_path, "r") as f:
             return json.load(f)
-        except json.JSONDecodeError:
-            return default if default is not None else {}
+    except json.JSONDecodeError:
+        return default if default is not None else {}
+
 
 def save_json(file_path, data):
-    """Save data to JSON file with proper formatting."""
     with open(file_path, "w") as f:
         json.dump(data, f, indent=4)
 
+
 def log_trade(message):
-    """Log trade activity with timestamp."""
-    timestamp = datetime.utcnow().isoformat()
     with open(TRADES_LOG, "a") as f:
-        f.write(f"{timestamp} | {message}\n")
+        f.write(f"{datetime.utcnow().isoformat()} | {message}\n")
 
-# ------------------- Paper Trade Summary Functions -------------------
 
+def log_trade_csv(timestamp, action, coin, price, size, pnl, currency):
+    header_needed = not os.path.exists(CSV_FILE)
+    try:
+        with open(CSV_FILE, "a", newline='') as f:
+            writer = csv.writer(f)
+            if header_needed:
+                writer.writerow(["timestamp", "action", "coin", "price", "size", "pnl", "currency"])
+            writer.writerow([timestamp, action, coin, f"{price:.2f}", f"{size:.2f}", f"{pnl:.2f}", currency])
+    except Exception as e:
+        print(f"CSV log failed: {e}")
+
+
+# ------------------- Summary -------------------
 def update_summary(coin, pnl, trade_type="MANUAL"):
-    """
-    Updates paper trading summary.
-    
-    Args:
-        coin: Trading pair
-        pnl: Profit/loss
-        trade_type: Type of exit (MANUAL, STOP_LOSS, TAKE_PROFIT, TRAILING_STOP)
-    """
     summary = load_json(SUMMARY_FILE, default={})
+    s = summary.setdefault(coin, {})
+    s.setdefault("trades", 0)
+    s.setdefault("total_pnl", 0.0)
+    s.setdefault("wins", 0)
+    s.setdefault("losses", 0)
+    s.setdefault("breakeven", 0)
+    s.setdefault("exit_types", {})
 
-    coin_summary = summary.get(coin, {})
-    coin_summary.setdefault("trades", 0)
-    coin_summary.setdefault("total_pnl", 0.0)
-    coin_summary.setdefault("wins", 0)
-    coin_summary.setdefault("losses", 0)
-    coin_summary.setdefault("exit_types", {})
+    s["trades"] += 1
+    s["total_pnl"] += pnl
 
-    coin_summary["trades"] += 1
-    coin_summary["total_pnl"] += pnl
-    
-    # Track wins/losses
-    if pnl > 0:
-        coin_summary["wins"] += 1
+    if pnl > 0.01:
+        s["wins"] += 1
+    elif pnl < -0.01:
+        s["losses"] += 1
     else:
-        coin_summary["losses"] += 1
-    
-    # Track exit types
-    exit_types = coin_summary["exit_types"]
-    exit_types[trade_type] = exit_types.get(trade_type, 0) + 1
-    
-    summary[coin] = coin_summary
+        s["breakeven"] += 1
 
-    # Calculate totals
-    total = 0.0
-    total_wins = 0
-    total_losses = 0
-    for v in summary.values():
-        if isinstance(v, dict) and "total_pnl" in v:
-            total += v["total_pnl"]
-            total_wins += v.get("wins", 0)
-            total_losses += v.get("losses", 0)
-    
-    summary["total_pnl"] = total
+    s["exit_types"][trade_type] = s["exit_types"].get(trade_type, 0) + 1
+    summary[coin] = s
+
+    # Global stats
+    total_pnl = sum(v.get("total_pnl", 0) for v in summary.values() if isinstance(v, dict))
+    total_wins = sum(v.get("wins", 0) for v in summary.values() if isinstance(v, dict))
+    total_losses = sum(v.get("losses", 0) for v in summary.values() if isinstance(v, dict))
+    total_trades = total_wins + total_losses
+
+    summary["total_pnl"] = round(total_pnl, 2)
     summary["total_wins"] = total_wins
     summary["total_losses"] = total_losses
-    summary["win_rate"] = (total_wins / (total_wins + total_losses) * 100) if (total_wins + total_losses) > 0 else 0
+    summary["win_rate"] = round(total_wins / total_trades * 100, 1) if total_trades > 0 else 0.0
 
     save_json(SUMMARY_FILE, summary)
     return summary
 
-# ------------------- Enhanced Paper Trade Execution -------------------
 
-def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, override_risk=False):
-    """
-    Enhanced paper trade execution with risk management.
-    
-    Args:
-        coin: Trading pair
-        signal: 1=BUY, -1=SELL, 0=HOLD
-        price: Current price
-        currency: Currency to use
-        trade_size: Custom trade size (None = use risk-based sizing)
-        override_risk: Skip risk checks (dangerous, for testing only)
-        
-    Returns:
-        str: Trade result message
-    """
-    balances = load_json(BALANCE_FILE, default=DEFAULT_BALANCES.copy())
-    positions = load_json(POSITIONS_FILE, default={})
-    
+# ------------------- Execute Trade -------------------
+def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, override_risk=False, atr=None):
+    config = load_config()
+    balances = load_json(BALANCE_FILE, DEFAULT_BALANCES.copy())
+    positions = load_json(POSITIONS_FILE, {})
+    timestamp = datetime.utcnow().isoformat()
+
     if currency not in balances:
-        balances[currency] = {"cash": 0}
-    
+        balances[currency] = {"cash": 0.0}
     account = balances[currency]
     position = positions.get(coin)
-    timestamp = datetime.utcnow().isoformat()
-    
-    # Check for automatic exit conditions first
+
+    # --- AUTO EXIT ---
     if position and signal != -1:
-        should_exit, reason, pnl_pct = check_exit_conditions(coin, price)
-        if should_exit:
-            # Force exit due to risk management
+        sl = position.get("stop_loss")
+        tp = position.get("take_profit")
+        if sl is not None and price <= sl:
             return execute_paper_trade(coin, -1, price, currency, override_risk=True)
-    
-    # Update peak price if holding
-    if position and signal == 0:
-        update_peak_price(coin, price)
-    
-    # --- BUY LOGIC ---
+        if tp is not None and price >= tp:
+            return execute_paper_trade(coin, -1, price, currency, override_risk=True)
+
+    # --- BUY ---
     if signal == 1:
-        if position is not None:
-            return f"{coin} ALREADY IN POSITION (entry: {position['entry_price']:.2f})"
-        
-        # Check position limits
+        if position:
+            return f"{coin} ALREADY IN POSITION @ ${position.get('entry_price', 0.0):.2f}"
+
         if not override_risk:
-            can_open, current_count, max_allowed = check_max_positions()
+            can_open, current, max_pos = check_max_positions(len(positions), config)
             if not can_open:
-                return f"{coin} CANNOT OPEN: MAX_POSITIONS_REACHED ({current_count}/{max_allowed})"
-        
-        # Calculate position size
-        calc_size, size_reason = calculate_position_size(currency)
-        
-        # If custom size provided, use it
-        if trade_size is not None:
-            calc_size = trade_size
-            size_reason = "CUSTOM_SIZE"
-        
-        if calc_size == 0:
-            return f"{coin} CANNOT BUY: {size_reason}"
-        
-        # Calculate costs
-        costs = calculate_fees_and_slippage(calc_size, price)
-        config = load_risk_config()
-        effective_price = price * (1 + config["slippage_pct"])  # Buy at slightly higher price
-        
-        # Check balance after costs
-        total_cost = calc_size + costs["total_cost"]
+                return f"MAX POSITIONS: {current}/{max_pos}"
+
+        if atr is None or atr <= 0:
+            return "ERROR: ATR required (>0)"
+
+        approx_sl, _ = calculate_dynamic_sl_tp(price, atr, "BUY", config)
+        calc_size = calc_position_size(account["cash"], price, approx_sl, config)
+
+        calc_size = trade_size or calc_size
+        if calc_size <= 0:
+            return "SIZE TOO SMALL"
+
+        fees_info = calculate_fees_and_slippage(calc_size, config)
+        total_cost = calc_size + fees_info["total_cost"]
         if account["cash"] < total_cost:
-            return f"{coin} NOT ENOUGH {currency} (need: ${total_cost:.2f}, have: ${account['cash']:.2f})"
-        
-        # Execute buy
+            return f"INSUFFICIENT FUNDS: need ${total_cost:.2f}"
+
+        effective_price = price * (1 + config.get("slippage_pct", 0.0005))
+        sl, tp = calculate_dynamic_sl_tp(effective_price, atr, "BUY", config)
+
         account["cash"] -= total_cost
         positions[coin] = {
             "entry_price": effective_price,
@@ -192,175 +170,136 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
             "entry_time": timestamp,
             "currency": currency,
             "trade_size": calc_size,
-            "fees_paid": costs["total_cost"],
+            "fees_paid": fees_info["total_cost"],
             "peak_price": effective_price,
-            "stop_loss": calculate_stop_loss(effective_price),
-            "take_profit": calculate_take_profit(effective_price)
+            "stop_loss": sl,
+            "take_profit": tp
         }
-        
+
         save_json(POSITIONS_FILE, positions)
         save_json(BALANCE_FILE, balances)
-        log_trade(f"BUY | {coin} | {effective_price:.2f} | {calc_size:.2f} {currency} | fees: {costs['total_cost']:.2f}")
-        
-        return (f"{coin} PAPER BUY @ {effective_price:.2f} ({currency})\n"
-                f"   Size: ${calc_size:.2f} | Fees: ${costs['total_cost']:.2f}\n"
-                f"   Stop Loss: ${positions[coin]['stop_loss']:.2f} | Take Profit: ${positions[coin]['take_profit']:.2f}")
-    
-    # --- SELL LOGIC ---
+        log_trade(f"BUY {coin} @ {effective_price:.2f} | ${calc_size:.2f}")
+        log_trade_csv(timestamp, "BUY", coin, effective_price, calc_size, 0.0, currency)
+
+        return f"BUY {coin} @ ${effective_price:.2f}\nSize: ${calc_size:.2f}\nSL: ${sl:.2f} | TP: ${tp:.2f}"
+
+    # --- SELL ---
     if signal == -1:
-        if position is None:
-            return f"{coin} NO POSITION TO SELL"
-        
-        entry_price = position["entry_price"]
-        trade_size_pos = position["trade_size"]
-        position_currency = position["currency"]
-        fees_paid_on_entry = position.get("fees_paid", 0)
-        
-        # Calculate costs for selling
-        costs = calculate_fees_and_slippage(trade_size_pos, price)
-        config = load_risk_config()
-        effective_price = price * (1 - config["slippage_pct"])  # Sell at slightly lower price
-        
-        # Calculate PnL
-        num_coins = trade_size_pos / entry_price
-        gross_pnl = (effective_price - entry_price) * num_coins
-        net_pnl = gross_pnl - costs["total_cost"] - fees_paid_on_entry
-        
-        # Update balance
-        proceeds = trade_size_pos + gross_pnl - costs["total_cost"]
-        balances[position_currency]["cash"] += proceeds
-        
-        # Determine exit reason
-        should_exit, exit_reason, pnl_pct = check_exit_conditions(coin, price)
-        trade_type = exit_reason.split()[0] if exit_reason else "MANUAL"
-        
-        # Update summary
-        update_summary(coin, net_pnl, trade_type)
-        log_trade(f"SELL | {coin} | {effective_price:.2f} | Net PnL: {net_pnl:.2f} {position_currency} | Type: {trade_type}")
-        
-        # Close position
+        if not position:
+            return f"{coin} NO POSITION"
+
+        entry = position["entry_price"]
+        size = position["trade_size"]
+        fees_in = position.get("fees_paid", 0.0)
+        pos_curr = position["currency"]
+
+        fees_info = calculate_fees_and_slippage(size, config)
+        effective_price = price * (1 - config.get("slippage_pct", 0.0005))
+        fees_out = fees_info["total_cost"]
+
+        num_coins = size / entry
+        gross_pnl = (effective_price - entry) * num_coins
+        net_pnl = gross_pnl - fees_out - fees_in
+        proceeds = size + gross_pnl - fees_out
+
+        balances[pos_curr]["cash"] += proceeds
+
+        exit_type = "MANUAL"
+        sl = position.get("stop_loss")
+        tp = position.get("take_profit")
+        if sl is not None and effective_price <= sl:
+            exit_type = "STOP_LOSS"
+        elif tp is not None and effective_price >= tp:
+            exit_type = "TAKE_PROFIT"
+
+        update_summary(coin, net_pnl, exit_type)
+        log_trade(f"SELL {coin} @ {effective_price:.2f} | PnL {net_pnl:+.2f}")
+        log_trade_csv(timestamp, "SELL", coin, effective_price, size, net_pnl, pos_curr)
+
         del positions[coin]
         save_json(POSITIONS_FILE, positions)
         save_json(BALANCE_FILE, balances)
-        
-        pnl_sign = "+" if net_pnl >= 0 else ""
-        return (f"{coin} PAPER SELL @ {effective_price:.2f} | Net PnL: {pnl_sign}${net_pnl:.2f} {position_currency}\n"
-                f"   Gross PnL: ${gross_pnl:.2f} | Fees: ${costs['total_cost'] + fees_paid_on_entry:.2f}\n"
-                f"   Exit Type: {trade_type} | Return: {pnl_pct*100:.2f}%")
-    
-    # --- HOLD LOGIC ---
-    if position is not None:
-        entry = position['entry_price']
-        unrealized = (price - entry) * (position['trade_size'] / entry)
-        should_exit, reason, pnl_pct = check_exit_conditions(coin, price)
-        
-        status = f"{coin} HOLDING (entry: ${entry:.2f}, unrealized: ${unrealized:.2f}, {pnl_pct*100:.2f}%)"
-        if should_exit:
-            status += f"\n   WARNING: {reason} triggered!"
-        return status
-    
-    return f"{coin} HOLD - NO POSITION"
+
+        return f"SELL {coin} @ ${effective_price:.2f}\nPnL: {net_pnl:+.2f} {pos_curr}\nExit: {exit_type}"
+
+    # --- HOLD ---
+    if position:
+        unreal = (price - position["entry_price"]) * (position["trade_size"] / position["entry_price"])
+        pct = unreal / position["trade_size"] * 100
+        return f"HOLD {coin}\nUnreal: {unreal:+.2f} ({pct:+.1f}%)"
+
+    return f"{coin} NO POSITION"
+
 
 # ------------------- Summary Display -------------------
-
 def summarize_paper_trades():
-    """Enhanced summary with risk metrics."""
-    positions = load_json(POSITIONS_FILE, default={})
-    balances = load_json(BALANCE_FILE, default=DEFAULT_BALANCES.copy())
-    summary = load_json(SUMMARY_FILE, default={})
-    config = load_risk_config()
-    
+    positions = load_json(POSITIONS_FILE, {})
+    balances = load_json(BALANCE_FILE, DEFAULT_BALANCES.copy())
+    summary = load_json(SUMMARY_FILE, {})
+    config = load_config()
+
     print("\n" + "="*60)
-    print("PAPER TRADING SUMMARY (RISK-MANAGED)".center(60))
+    print("PAPER TRADING SUMMARY".center(60))
     print("="*60)
-    
-    # Cash balances
+
+    usd_cash = 0.0
+    for curr in SUPPORTED_CURRENCIES:
+        cash = balances.get(curr, {}).get("cash", 0.0)
+        if curr == "USD":
+            usd_cash += cash
+        elif curr == "ZAR":
+            usd_cash += cash * ZAR_TO_USD_RATE
+
+    exposure = sum(p.get("trade_size", 0.0) for p in positions.values())
+    total = usd_cash + exposure
+    exp_pct = exposure / total * 100 if total > 0 else 0
+
     print("\nCash Balances:")
-    total_cash = 0
-    for currency in SUPPORTED_CURRENCIES:
-        cash = balances.get(currency, {}).get("cash", 0)
-        total_cash += cash if currency == "USD" else 0
-        print(f"   {currency}: ${cash:,.2f}" if currency == "USD" else f"   {currency}: R{cash:,.2f}")
-    
-    # Open positions with risk levels
-    total_exposure = 0
+    for curr in SUPPORTED_CURRENCIES:
+        cash = balances.get(curr, {}).get("cash", 0.0)
+        sym = "$" if curr == "USD" else "R"
+        print(f"  {curr}: {sym}{cash:,.2f}")
+
+    print(f"\nTotal Cash (USD equiv): ${usd_cash:,.2f}")
+    print(f"Exposure: ${exposure:,.2f} ({exp_pct:.1f}%)")
+    print(f"Open Positions: {len(positions)} / {config.get('max_positions', 5)}")
+
     if positions:
         print("\nOpen Positions:")
         for coin, pos in positions.items():
-            entry = pos["entry_price"]
-            size = pos["trade_size"]
-            stop_loss = pos.get("stop_loss", 0)
-            take_profit = pos.get("take_profit", 0)
-            peak = pos.get("peak_price", entry)
-            
-            total_exposure += size
-            
-            print(f"   {coin}")
-            print(f"      Entry: ${entry:.2f} | Size: ${size:.2f}")
-            print(f"      Stop Loss: ${stop_loss:.2f} | Take Profit: ${take_profit:.2f}")
-            print(f"      Peak: ${peak:.2f}")
-    else:
-        print("\nOpen Positions: None")
-    
-    # Portfolio metrics
-    total_value = total_cash + total_exposure
-    exposure_pct = (total_exposure / total_value * 100) if total_value > 0 else 0
-    cash_pct = (total_cash / total_value * 100) if total_value > 0 else 0
-    
-    print(f"\nPortfolio Metrics:")
-    print(f"   Total Value: ${total_value:.2f}")
-    print(f"   Cash: ${total_cash:.2f} ({cash_pct:.1f}%)")
-    print(f"   Exposure: ${total_exposure:.2f} ({exposure_pct:.1f}%)")
-    print(f"   Open Positions: {len(positions)}/{config['max_positions']}")
-    
-    # Trade statistics
-    if summary and len([k for k in summary.keys() if k not in ["total_pnl", "total_wins", "total_losses", "win_rate"]]) > 0:
-        print("\nTrade Statistics:")
-        for coin, data in summary.items():
-            if coin in ["total_pnl", "total_wins", "total_losses", "win_rate"]:
-                continue
-            if isinstance(data, dict) and "trades" in data:
-                trades = data["trades"]
-                pnl = data["total_pnl"]
-                wins = data.get("wins", 0)
-                losses = data.get("losses", 0)
-                win_rate = (wins / trades * 100) if trades > 0 else 0
-                
-                pnl_sign = "+" if pnl >= 0 else ""
-                print(f"   {coin}: {trades} trade(s), {pnl_sign}${pnl:.2f} | W/L: {wins}/{losses} ({win_rate:.1f}%)")
-        
-        total_pnl = summary.get('total_pnl', 0)
-        win_rate = summary.get('win_rate', 0)
-        total_sign = "+" if total_pnl >= 0 else ""
-        roi = (total_pnl / 1000 * 100) if total_pnl != 0 else 0
-        
-        print(f"\n   TOTAL PnL: {total_sign}${total_pnl:.2f} | ROI: {roi:.2f}% | Win Rate: {win_rate:.1f}%")
-    
+            entry = pos.get("entry_price", 0.0)
+            size = pos.get("trade_size", 0.0)
+            print(f"  {coin} @ ${entry:.2f} | Size: ${size:.2f}")
+
+            sl = pos.get("stop_loss")
+            tp = pos.get("take_profit")
+            if sl is not None and tp is not None:
+                print(f"    SL: ${sl:.2f} | TP: ${tp:.2f}")
+            else:
+                print("    SL: N/A | TP: N/A  (legacy position - no dynamic risk)")
+
+    if "total_pnl" in summary:
+        total_trades = summary["total_wins"] + summary["total_losses"]
+        print(f"\nPerformance:")
+        print(f"  Total PnL: {summary['total_pnl']:+.2f} USD")
+        if total_trades > 0:
+            print(f"  Win Rate: {summary['win_rate']:.1f}% ({summary['total_wins']}/{total_trades} trades)")
+        else:
+            print("  Win Rate: No closed trades yet")
+
     print("="*60 + "\n")
 
-# ------------------- Reset Function -------------------
 
-def reset_paper_trading(reset_risk_config=True):
-    """
-    Reset paper trading to default state.
-    
-    Args:
-        reset_risk_config: If True, also reset risk configuration to defaults
-    """
+# ------------------- Reset -------------------
+def reset_paper_trading():
     save_json(BALANCE_FILE, DEFAULT_BALANCES.copy())
     save_json(POSITIONS_FILE, {})
     save_json(SUMMARY_FILE, {})
-    
-    # Reset risk config if requested
-    if reset_risk_config:
-        save_risk_config(DEFAULT_RISK_CONFIG.copy())
-    
-    if os.path.exists(TRADES_LOG):
-        with open(TRADES_LOG, "w") as f:
-            f.write(f"{datetime.utcnow().isoformat()} | Paper trading reset\n")
-    
-    print("Paper trading account reset!")
-    print(f"   USD: ${DEFAULT_BALANCES['USD']['cash']}")
-    print(f"   ZAR: R{DEFAULT_BALANCES['ZAR']['cash']}")
-    if reset_risk_config:
-        print(f"   Risk Config: Reset to defaults")
+    save_config(ENHANCED_RISK_CONFIG.copy())
+
+    with open(TRADES_LOG, "w") as f:
+        f.write(f"{datetime.utcnow().isoformat()} | PAPER TRADING RESET\n")
+
+    print("Paper trading reset complete!")
+    print(f"  USD: ${DEFAULT_BALANCES['USD']['cash']:,.2f}")
+    print(f"  ZAR: R{DEFAULT_BALANCES['ZAR']['cash']:,.2f}")
