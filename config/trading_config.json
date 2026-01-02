@@ -1,0 +1,13 @@
+{
+    "default_trade_size": 6,
+    "default_currency": "USD",
+    "check_interval_seconds": 600,
+    "enable_discord_alerts": true,
+    "enable_telegram_alerts": false,
+    "enable_email_alerts": false,
+    "auto_trade_enabled": true,
+    "dry_run_mode": false,
+    "max_daily_trades": 40,
+    "cooldown_after_trade_minutes": 5,
+    "signal_confirmation_required": 1
+}

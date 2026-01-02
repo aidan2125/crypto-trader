@@ -1,0 +1,55 @@
+Open a terminal in your project folder
+
+You’re already in ~/crypto-trader, so that’s perfect.
+
+2️⃣ Create a new file
+
+You can use a text editor like nano, vim, or VS Code. For example, using nano:
+
+nano diagnostics.py
+
+
+This opens a blank file called diagnostics.py.
+
+3️⃣ Paste the code
+
+Copy the Python code I gave you for diagnostics.py and paste it into the editor.
+
+4️⃣ Save and exit
+
+In nano:
+
+Press Ctrl + O → Enter to save
+
+Press Ctrl + X to exit
+
+5️⃣ Make it executable (optional)
+
+You can allow it to be run directly:
+
+chmod +x diagnostics.py
+
+
+Then you can run it with:
+
+./diagnostics.py
+
+
+Or simply:
+
+python3 diagnostics.py
+
+6️⃣ Optional: Add an alias for convenience
+
+If you want a short command:
+
+echo "alias bot-status='python3 ~/crypto-trader/diagnostics.py'" >> ~/.bashrc
+source ~/.bashrc
+
+
+Now you can just type:
+
+bot-status
+
+
+and it will run the script from anywhere.

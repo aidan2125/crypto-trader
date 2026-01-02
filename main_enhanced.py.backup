@@ -2,44 +2,15 @@
 Enhanced Main Bot with Risk Management and Discord Alerts
 Integrates: signals, risk management, alerts, paper trading
 """
-
-# At the very top of your main bot script, BEFORE other imports
-import subprocess
-import sys
-
-# Check dependencies first
-try:
-    from check_dependencies import ensure_dependencies
-    
-    required_packages = [
-        "numpy",
-        "pandas",
-        "ccxt",
-        "matplotlib",
-        "requests"
-    ]
-    
-    ensure_dependencies(required_packages)
-except ImportError:
-    # If check_dependencies doesn't exist, create inline check
-    def check_pkg(pkg):
-        try:
-            __import__(pkg)
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-            print(f"Installed {pkg}. Please restart the script.")
-            sys.exit(0)
-    
-    for pkg in ["numpy", "pandas"]:
-        check_pkg(pkg)
-   
+from dotenv import load_dotenv
+load_dotenv()
 import logging
 import os
 import time
 from datetime import datetime
 from data.multi_coin_list import COIN_CURRENCY
 from data.market_data import fetch_ohlcv
-from strategies.enhanced_signals import enhanced_strategy
+from strategies.signals import moving_average_signal
 from reports.plot_signals import plot_signals
 from alerts.telegram_alerts import send_telegram_message
 from alerts.email_alerts import send_email
@@ -51,9 +22,7 @@ from execution.enhanced_paper_trader import (
     check_exit_conditions,
     update_peak_price
 )
-from risk.dynamic_risk import load_risk_config
-
-
+from risk.risk_management import load_risk_config
 
 # Ensure directories exist
 os.makedirs("logs", exist_ok=True)
@@ -67,8 +36,6 @@ logging.basicConfig(
 )
 
 DEFAULT_CURRENCY = "USD"
-
-
 
 def send_all_alerts(message, coin=""):
     """
@@ -152,7 +119,7 @@ def run_for_coin(coin):
             return
 
         # Step 2: Calculate indicators/signals
-        df = enhanced_strategy(df)
+        df = moving_average_signal(df)
         
         if "signal" not in df.columns or df.empty:
             logging.warning(f"{coin}: No signal column in dataframe")

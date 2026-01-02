@@ -1,0 +1,15 @@
+alerts
+backtest
+backups
+config
+data
+execution
+logs
+reports
+risk
+scripts
+strategies
+tests
+tools
+utils
+venv
