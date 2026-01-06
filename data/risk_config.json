@@ -12,5 +12,6 @@
     "trading_fee_pct": 0.001,
     "slippage_pct": 0.0005,
     "max_portfolio_risk": 0.2,
-    "max_loss_per_trade_pct": 0.02
+    "max_loss_per_trade_pct": 0.02,
+    "risk_per_trade": 0.02
 }

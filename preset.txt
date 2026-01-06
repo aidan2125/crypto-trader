@@ -1,0 +1,63 @@
+Complete Guide: Continuous Risk Preset + Bot Runner
+Here are all the instructions clearly labeled and organized so you can easily copy, save, and use them (e.g., in a text file or README).
+1. What This Does
+This setup automatically:
+
+Forces your chosen risk preset (conservative, moderate, or aggressive) into data/risk_config.json
+Immediately runs your main trading bot/script (ehnaced.py)
+Waits 3–5 minutes
+Repeats forever
+
+Perfect if your bot reads the config file only at startup — this ensures it always starts with your desired risk settings.
+2. Full Code (Save as run_with_risk_preset.py)
+Python#!/usr/bin/env python3
+"""
+Continuous Runner: Applies Risk Preset + Runs Your Main Bot
+Applies a risk preset, then immediately runs ehnaced.py
+Repeats every few minutes.
+
+Usage:
+    python run_with_risk_preset.py <preset> [interval_minutes]
+
+Examples:
+    python run_with_risk_preset.py moderate
+    python run_with_risk_preset.py aggressive 3
+    python run_with_risk_preset.py conservative 5
+"""
+3. Setup Instructions
+
+Save the file
+Copy the entire code above.
+Paste into a new file.
+Name it: run_with_risk_preset.py
+
+Place it correctly
+Put this file in the same folder as:
+Your main bot file (ehnaced.py)
+The data folder (or where you want risk_config.json to be)
+
+
+Check the main script name
+Look at this line near the top:PythonMAIN_SCRIPT = "ehnaced.py"
+If your bot file is named differently (e.g., enhanced.py, bot.py, main.py), change it to match exactly.
+
+
+4. How to Run It
+Open a terminal (or Command Prompt/PowerShell on Windows) in the folder and use one of these commands:
+
+Moderate preset, every 4 minutes (recommended starting point):Bashpython run_with_risk_preset.py moderate
+Aggressive preset, every 3 minutes:Bashpython run_with_risk_preset.py aggressive 3
+Conservative preset, every 5 minutes:Bashpython run_with_risk_preset.py conservative 5
+
+5. What You'll See
+
+Startup summary
+Each cycle shows:
+Which preset was applied and what changed
+Your bot starting and finishing
+Sleep message
+
+Clean numbering of cycles
+
+6. How to Stop
+Press Ctrl + C in the terminal. It will stop gracefully.
