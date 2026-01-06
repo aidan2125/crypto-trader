@@ -1,0 +1,90 @@
+# ================================================
+# CRYPTO TRADING BOT - FULL SETUP & BACKGROUND RUN
+# ================================================
+
+# 1. Go to your project folder (change if your folder name is different)
+cd ~/crypto-trader-desktop
+
+# 2. (Re)create a clean virtual environment (recommended on new machine)
+deactivate 2>/dev/null || true
+rm -rf .venv
+python3 -m venv .venv
+
+# 3. Activate the virtual environment
+source .venv/bin/activate
+
+# 4. Upgrade pip and install all required packages
+pip install --upgrade pip
+pip install pandas numpy matplotlib requests ccxt python-telegram-bot discord.py yfinance
+
+# 5. (Optional) If you have a requirements.txt file, use this instead of line above:
+# pip install -r requirements.txt
+
+# 6. Test a single run to make sure everything works
+python main_enhanced.py
+
+# 7. If the test run works perfectly, now start the bot in the background for a week+
+
+# Install screen (allows you to detach and re-attach anytime)
+sudo apt update
+sudo apt install screen -y
+
+# Start a detachable screen session
+screen -S crypto_bot
+
+# === Inside the screen session, run these ===
+# (After typing the line below, press Enter)
+cd ~/crypto-trader-desktop
+source .venv/bin/activate
+python main_enhanced.py continuous 300
+# ===========================================
+
+# 8. Detach from screen (bot keeps running!)
+# Press: Ctrl + A, then D
+# You will see: [detached from ...]
+
+# ================================================
+# LATER: How to check / stop the bot
+# ================================================
+
+# List running screen sessions
+screen -ls
+
+# Re-attach to see live output
+screen -r crypto_bot
+
+# To stop the bot: re-attach (screen -r crypto_bot), then press Ctrl + C, then type 'exit'
+
+# Force stop if needed
+screen -X -S crypto_bot quit
+
+# View the main log file live
+tail -f logs/bot.log
+
+# View the console output log live
+tail -f logs/bot_run.log   # (only if you used nohup instead)
+
+# ================================================
+# OPTIONAL: Auto-start on boot (survives reboots)
+# ================================================
+
+# Create startup script
+nano ~/start_crypto_bot.sh
+
+# Paste this into the file and save (Ctrl+O, Enter, Ctrl+X):
+"""
+#!/bin/bash
+cd /home/aidan/crypto-trader-desktop
+source .venv/bin/activate
+screen -dmS crypto_bot python main_enhanced.py continuous 300
+"""
+
+# Make it executable
+chmod +x ~/start_crypto_bot.sh
+
+# Add to crontab (runs at boot)
+crontab -e
+# Add this line at the bottom:
+@reboot /home/aidan/start_crypto_bot.sh >> /home/aidan/crypto-trader-desktop/logs/boot.log 2>&1
+
+# Done! Bot will now start automatically after every reboot.

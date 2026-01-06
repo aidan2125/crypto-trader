@@ -6,6 +6,8 @@ Dynamic ATR-based Risk Management + Multi-Channel Alerts
 import logging
 import os
 import time
+import json
+import argparse
 from datetime import datetime
 
 from data.multi_coin_list import COIN_CURRENCY
@@ -164,9 +166,9 @@ def main(continuous: bool = False, interval: int = 300):
 
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "continuous":
-        interval = int(sys.argv[2]) if len(sys.argv) > 2 else 300
-        main(continuous=True, interval=interval)
-    else:
-        main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true", help="Run once and exit")
+    parser.add_argument("--interval", type=int, default=300, help="Sleep interval in seconds")
+    args = parser.parse_args()
+
+    main(continuous=not args.once, interval=args.interval)

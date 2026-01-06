@@ -6,7 +6,7 @@ Professional testing framework with detailed reporting and edge case coverage
 import sys
 import time
 from datetime import datetime
-from execution.paper_trader import execute_paper_trade, summarize_paper_trades, reset_paper_trading
+from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades, reset_paper_trading
 
 class TestResult:
     """Store test results for reporting"""

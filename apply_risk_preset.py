@@ -34,6 +34,8 @@ PRESETS = {
     }
 }
 
+
+
 def apply_preset(preset_name: str):
     if preset_name.lower() not in PRESETS:
         print(f"❌ Unknown preset: {preset_name}")
@@ -64,6 +66,8 @@ def apply_preset(preset_name: str):
 
     print("\nNew config saved to:", RISK_CONFIG_PATH)
 
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python apply_risk_preset.py <preset>")
@@ -71,3 +75,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     apply_preset(sys.argv[1])
+
