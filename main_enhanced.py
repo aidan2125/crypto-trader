@@ -86,10 +86,20 @@ def run_for_coin(coin: str):
         try:
             plot_signals(df, filename=f"{coin.replace('/', '_')}_signals.png")
         except Exception as e:
-            logging.error(f"{coin}: Plot error: {e}")
+            logging.exception(f"{coin}: Plot error")
 
         current_signal = int(df["signal"].iloc[-1])
         price = float(df["close"].iloc[-1])
+        
+        # FIXED: Extract ATR from strategy output
+        atr = None
+        if "atr" in df.columns and not df["atr"].isna().iloc[-1]:
+            atr = float(df["atr"].iloc[-1])
+        
+        # Get signal quality if available
+        signal_quality = None
+        if "signal_quality" in df.columns and not df["signal_quality"].isna().iloc[-1]:
+            signal_quality = float(df["signal_quality"].iloc[-1])
 
         if current_signal not in [-1, 0, 1]:
             logging.warning(f"{coin}: Invalid signal {current_signal}")
@@ -99,24 +109,35 @@ def run_for_coin(coin: str):
         previous_signal = last_signals.get(coin)
 
         if current_signal != previous_signal:
+            # FIXED: Pass ATR to paper trader
             trade_result = execute_paper_trade(
                 coin=coin,
                 signal=current_signal,
                 price=price,
-                currency=currency
+                currency=currency,
+                atr=atr  # Now includes ATR for dynamic SL/TP
             )
 
             signal_names = {-1: "SELL", 0: "HOLD", 1: "BUY"}
             signal_name = signal_names.get(current_signal, str(current_signal))
 
-            message = (
-                f"**SIGNAL CHANGE**\n"
-                f"Coin: {coin}\n"
-                f"Signal: {signal_name}\n"
-                f"Price: ${price:.2f} {currency}\n"
-                f"Previous: {signal_names.get(previous_signal, 'None')}\n"
-                f"\nTrade: {trade_result or 'No action'}"
-            )
+            # Enhanced message with ATR and quality info
+            message_parts = [
+                f"**SIGNAL CHANGE**",
+                f"Coin: {coin}",
+                f"Signal: {signal_name}",
+                f"Price: ${price:.2f} {currency}",
+                f"Previous: {signal_names.get(previous_signal, 'None')}"
+            ]
+            
+            if atr is not None:
+                message_parts.append(f"ATR: ${atr:.2f}")
+            
+            if signal_quality is not None:
+                message_parts.append(f"Quality: {signal_quality:.0f}/100")
+            
+            message_parts.append(f"\nTrade: {trade_result or 'No action'}")
+            message = "\n".join(message_parts)
 
             alert_results = send_all_alerts(message, coin)
             alerts_sent = ", ".join(k for k, v in alert_results.items() if v)
@@ -124,14 +145,63 @@ def run_for_coin(coin: str):
             last_signals[coin] = current_signal
             save_last_signals(last_signals)
 
-            logging.info(f"{coin}: {previous_signal} → {current_signal} | Alerts: {alerts_sent}")
+            log_msg = f"{coin}: {previous_signal} → {current_signal}"
+            if signal_quality:
+                log_msg += f" | Quality: {signal_quality:.0f}"
+            log_msg += f" | Alerts: {alerts_sent}"
+            
+            logging.info(log_msg)
             print(f"\n{message}\nAlerts: {alerts_sent}\n")
         else:
             logging.info(f"{coin}: No change (signal {current_signal})")
 
     except Exception as e:
-        logging.error(f"{coin} error: {e}")
+        logging.exception(f"{coin} error")
         print(f"ERROR {coin}: {e}")
+
+
+def check_all_positions_for_exits():
+    """
+    Check all open positions for stop loss or take profit hits.
+    This runs independently of signal changes for better risk management.
+    """
+    try:
+        from execution.enhanced_paper_trader import load_json, POSITIONS_FILE
+        
+        positions = load_json(POSITIONS_FILE, {})
+        
+        if not positions:
+            return
+        
+        for coin, position in list(positions.items()):
+            try:
+                # Fetch current price
+                df = fetch_ohlcv(symbol=coin, limit=1)
+                if df is None or df.empty:
+                    continue
+                
+                current_price = float(df["close"].iloc[-1])
+                sl = position.get("stop_loss")
+                tp = position.get("take_profit")
+                entry = position.get("entry_price")
+                currency = position.get("currency", DEFAULT_CURRENCY)
+                
+                # Check for SL/TP hits
+                if sl and current_price <= sl:
+                    logging.info(f"{coin}: Stop Loss hit at ${current_price:.2f}")
+                    print(f"\n[AUTO EXIT] {coin} Stop Loss hit!")
+                    execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
+                    
+                elif tp and current_price >= tp:
+                    logging.info(f"{coin}: Take Profit hit at ${current_price:.2f}")
+                    print(f"\n[AUTO EXIT] {coin} Take Profit hit!")
+                    execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
+                    
+            except Exception as e:
+                logging.exception(f"Error checking position {coin}")
+                
+    except Exception as e:
+        logging.exception(f"Error in check_all_positions_for_exits")
 
 
 def main(continuous: bool = False, interval: int = 300):
@@ -149,10 +219,15 @@ def main(continuous: bool = False, interval: int = 300):
         print(f"  Max Risk/Trade: {config.get('max_loss_per_trade_pct', 0.02)*100:.1f}%")
         print(f"  ATR SL: {config.get('atr_multiplier_sl', 2.0)}× | TP: {config.get('atr_multiplier_tp', 3.0)}×\n")
 
+        # Process each coin for signals
         for coin in COIN_CURRENCY:
             print(f"→ {coin}")
             run_for_coin(coin)
             time.sleep(1)
+
+        # FIXED: Check all open positions for SL/TP exits
+        print("\n→ Checking open positions for exits...")
+        check_all_positions_for_exits()
 
         print(f"\n{'='*70}")
         summarize_paper_trades()

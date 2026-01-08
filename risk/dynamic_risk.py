@@ -71,7 +71,13 @@ def calculate_dynamic_sl_tp(entry_price, atr, direction="BUY", config=None):
     """
     if config is None:
         config = load_enhanced_risk_config()
-    
+
+    # Normalize ATR to a numeric value if possible (defensive)
+    try:
+        atr = float(atr) if atr is not None else None
+    except (TypeError, ValueError):
+        atr = None
+
     # Use ATR-based if enabled and ATR is available
     if config.get("use_dynamic_sl_tp", False) and atr is not None and atr > 0:
         sl_distance = atr * config["atr_multiplier_sl"]
