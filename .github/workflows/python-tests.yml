@@ -15,21 +15,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5  # Updated to v5 for better caching
         with:
-          python-version: '3.11'  # Pin to a specific version (recommended)
-          cache: 'pip'            # Speeds up runs by caching dependencies
+          python-version: '3.11'  # Pin to a stable version (or '3.12')
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov  # Add cov if you want coverage later
-          # Install core testing + project runtime deps
-          pip install supabase python-dotenv requests
-          # If you have a requirements.txt (highly recommended!), use this instead:
-          # pip install -r requirements.txt
-          # pip install pytest  # only if not in requirements.txt
+          pip install -r requirements.txt
+          # If you don't have requirements.txt yet, fall back to manual:
+          # pip install pytest pytest-cov python-dotenv supabase requests
 
-      - name: Run tests
-        run: |
-          pytest -q
+      - name: Run tests with coverage
+        run: pytest --cov=. --cov-report=term-missing
