@@ -4,15 +4,24 @@ Ultimate Continuous Trader Runner
 1. Applies risk preset
 2. Runs backtest validation on BTC/USDT
 3. If backtest profitable → runs main_enhanced.py on ALL coins
-4. Repeats every X minutes
+4. Persists ALL backtest results to Supabase (passed or failed)
+5. Repeats every X minutes
 """
 
 import json
 import time
 import sys
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+# Supabase integration
+try:
+    from database.supabase_db import insert_backtest_result, seed_coins, get_active_preset, get_or_create_coin
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    print("Warning: Supabase integration not available")
 
 # === CONFIG ===
 RISK_CONFIG_PATH = Path("data") / "risk_config.json"
@@ -81,9 +90,34 @@ def apply_preset(preset_name: str) -> bool:
     print(f"Applied '{preset_name.capitalize()}' preset -> {RISK_CONFIG_PATH}")
     return True
 
-def run_validation_backtest() -> bool:
-    """Run backtest and return True if strategy passes validation"""
+def run_validation_backtest(preset_name: str) -> dict:
+    """Run backtest and return full result dict for Supabase persistence"""
     print(f"Running validation backtest on {VALIDATION_COIN}...")
+
+    backtest_result = {
+        "preset_id": None,
+        "coin_id": None,  # Will be populated below
+        "run_time": datetime.now(timezone.utc).isoformat(),
+        "timeframe": "1h",
+        "num_candles": 1000,
+        "num_trades": 0,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "roi": 0.0,
+        "max_drawdown": 0.0,
+        "avg_pnl": 0,
+        "passed": False
+    }
+
+    # Map preset name to preset_id
+    preset_id_map = {"conservative": 1, "moderate": 2, "aggressive": 3}
+    backtest_result["preset_id"] = preset_id_map.get(preset_name.lower(), 2)
+    
+    # Get or create coin for this validation
+    if SUPABASE_AVAILABLE:
+        coin_id = get_or_create_coin(VALIDATION_COIN)
+        if coin_id:
+            backtest_result["coin_id"] = coin_id
 
     try:
         result = subprocess.run(
@@ -98,45 +132,78 @@ def run_validation_backtest() -> bool:
 
         if result.returncode != 0:
             print("Backtest script crashed.")
-            return False
+            backtest_result["passed"] = False
+            return backtest_result
 
         if "No trades executed" in output or "No trades" in output:
             print("No trades in backtest - skipping live trading.")
-            return False
+            backtest_result["passed"] = False
+            return backtest_result
 
-        # Extract ROI and Win Rate
+        # Extract ROI, Win Rate, and other metrics
         roi_pct = 0.0
         win_rate = 0.0
+        max_drawdown = 0.0
+        total_trades = 0
+        profit_factor = 0.0
 
         for line in output.splitlines():
-            if "ROI" in line:
+            if "ROI" in line and ":" in line:
                 try:
                     roi_str = line.split(":")[1].strip().replace("%", "").replace("+", "")
-                    roi_pct = float(roi_str)
+                    roi_pct = float(roi_str) / 100.0  # Convert to decimal
                 except:
                     pass
-            if "Win Rate" in line:
+            if "Win Rate" in line and ":" in line:
                 try:
                     wr_str = line.split(":")[1].strip().replace("%", "")
-                    win_rate = float(wr_str) / 100
+                    win_rate = float(wr_str) / 100.0
+                except:
+                    pass
+            if "Max Drawdown" in line and ":" in line:
+                try:
+                    md_str = line.split(":")[1].strip().replace("%", "").replace("-", "")
+                    max_drawdown = -float(md_str) / 100.0
+                except:
+                    pass
+            if "Total Trades" in line and ":" in line:
+                try:
+                    total_trades = int(line.split(":")[1].strip())
+                except:
+                    pass
+            if "Profit Factor" in line and ":" in line:
+                try:
+                    profit_factor = float(line.split(":")[1].strip())
                 except:
                     pass
 
-        print(f"Backtest Result -> ROI: {roi_pct:+.1f}% | Win Rate: {win_rate:.1%}")
+        # Update result dict with parsed metrics
+        backtest_result["roi"] = roi_pct
+        backtest_result["win_rate"] = win_rate
+        backtest_result["max_drawdown"] = max_drawdown
+        backtest_result["num_trades"] = total_trades
+        backtest_result["profit_factor"] = profit_factor
 
-        if roi_pct >= MIN_ROI_FOR_LIVE and win_rate >= MIN_WIN_RATE:
+        print(f"Backtest Result -> ROI: {roi_pct*100:+.1f}% | Win Rate: {win_rate:.1%}")
+
+        # Determine if passed validation
+        if roi_pct >= (MIN_ROI_FOR_LIVE / 100.0) and win_rate >= MIN_WIN_RATE:
             print("Backtest PASSED - Starting trading on all coins!")
-            return True
+            backtest_result["passed"] = True
         else:
             print(f"Backtest FAILED (ROI < {MIN_ROI_FOR_LIVE:+.1f}% or Win Rate < {MIN_WIN_RATE:.0%})")
-            return False
+            backtest_result["passed"] = False
+
+        return backtest_result
 
     except subprocess.TimeoutExpired:
         print("Backtest timed out.")
-        return False
+        backtest_result["passed"] = False
+        return backtest_result
     except Exception as e:
         print(f"Backtest error: {e}")
-        return False
+        backtest_result["passed"] = False
+        return backtest_result
 
 def run_live_trading():
     """Launch your main_enhanced.py in continuous mode using argparse"""
@@ -158,6 +225,12 @@ def main():
     preset = sys.argv[1].lower()
     interval = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 
+    # Initialize Supabase if available
+    if SUPABASE_AVAILABLE:
+        print("Initializing Supabase integration...")
+        seed_coins()
+        print("✓ Database seeded\n")
+
     print(f"Starting Ultimate Trader Runner - Preset: {preset} | Cycle every {interval} min\n")
 
     cycle = 1
@@ -170,7 +243,20 @@ def main():
             if not apply_preset(preset):
                 break
 
-            if run_validation_backtest():
+            # Run backtest and get full result dict
+            backtest_result = run_validation_backtest(preset)
+
+            # Persist result to Supabase (always, whether passed or failed)
+            if SUPABASE_AVAILABLE:
+                success = insert_backtest_result(backtest_result)
+                if success:
+                    status_str = "PASSED" if backtest_result["passed"] else "FAILED"
+                    print(f"✓ Backtest result ({status_str}) saved to Supabase")
+                else:
+                    print("✗ Could not save backtest to Supabase (check logs)")
+
+            # Only run live trading if backtest passed
+            if backtest_result["passed"]:
                 run_live_trading()
 
             print(f"\nSleeping {interval} minutes until next cycle...\n")

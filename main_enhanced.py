@@ -21,7 +21,10 @@ from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
 
 # New: load active preset from Supabase (optional)
-from database.supabase_db import get_active_preset
+try:
+    from database.supabase_db import get_active_preset
+except ImportError:
+    get_active_preset = None
 
 # CORRECT IMPORT — file is risk/dynamic_risk.py
 from risk.dynamic_risk import load_enhanced_risk_config as load_config
@@ -207,10 +210,12 @@ def main(continuous: bool = False, interval: int = 300):
     run_count = 0
 
     # Prefer active preset from Supabase if available, fall back to local config
-    try:
-        supabase_config = get_active_preset("moderate")
-    except Exception:
-        supabase_config = None
+    supabase_config = None
+    if get_active_preset:
+        try:
+            supabase_config = get_active_preset("moderate")
+        except Exception:
+            supabase_config = None
 
     if supabase_config:
         config = supabase_config

@@ -6,6 +6,7 @@ Adjusts stop loss and take profit based on market volatility (ATR)
 import os
 import json
 from datetime import datetime
+from pathlib import Path
 
 RISK_CONFIG_FILE = Path("data") / "risk_config.json"
 
@@ -175,7 +176,7 @@ def save_enhanced_risk_config(config):
         json.dump(config, f, indent=4)
 
 # Persist config (keep as backup). Writes a timestamped backup and optionally updates main file.
-def save_risk_config_backup(config: dict, path: str = RISK_CONFIG_PATH, keep_main: bool = False):
+def save_risk_config_backup(config: dict, path: str = RISK_CONFIG_FILE, keep_main: bool = False):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     backup_dir = os.path.join(os.path.dirname(path) or ".", "backups")
     os.makedirs(backup_dir, exist_ok=True)

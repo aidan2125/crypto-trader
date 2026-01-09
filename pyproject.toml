@@ -11,3 +11,6 @@ dependencies = []  # Add real dependencies later, e.g. ["pandas", "ccxt"]
 where = ["."]
 
 dependencies = ["pandas", "requests", "ccxt"]
+
+[tool.poetry.dependencies]
+python-dotenv = "^1.0.0"

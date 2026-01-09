@@ -1,0 +1,367 @@
+================================================================================
+CRYPTO TRADER - SUPABASE INTEGRATION & BUG FIXES DOCUMENTATION
+Date: January 9, 2026
+================================================================================
+
+SUMMARY
+=======
+This document summarizes all improvements, fixes, and features implemented during
+the development session. The work focused on fixing import errors, integrating Supabase
+for risk preset management and backtest result storage, and adding proper database
+seeding functionality.
+
+================================================================================
+ISSUES FIXED
+================================================================================
+
+1. MISSING PATHLIB IMPORT
+   File: risk/dynamic_risk.py
+   Problem: Line 10 used Path() without importing from pathlib
+   Error: NameError: name 'Path' is not defined
+   Solution: Added "from pathlib import Path" at line 8
+   Status: ✓ FIXED
+
+2. UNDEFINED VARIABLE RISK_CONFIG_PATH
+   File: risk/dynamic_risk.py
+   Problem: Line 179 referenced RISK_CONFIG_PATH which doesn't exist
+   Error: NameError: name 'RISK_CONFIG_PATH' is not defined
+   Solution: Changed RISK_CONFIG_PATH to RISK_CONFIG_FILE (the actual variable)
+   Status: ✓ FIXED
+
+3. MISSING CCXT MODULE
+   File: (imported by data/market_data.py)
+   Problem: ModuleNotFoundError: No module named 'ccxt'
+   Solution: Installed ccxt package via pip install ccxt
+   Status: ✓ FIXED
+
+4. MISSING SUPABASE DATABASE IMPORT
+   File: main_enhanced.py
+   Problem: Tried to import get_active_preset from empty database/supabase_db.py
+   Error: Function doesn't exist
+   Solution: Wrapped import in try-except to gracefully handle missing function
+   Status: ✓ FIXED
+
+5. INCORRECT SUPABASE URL FORMAT
+   File: .env
+   Problem: SUPABASE_URL had duplicate "https://" scheme
+   Original: "https://https://lhvszlklqqysmbxatlbq.supabase.co"
+   Solution: Corrected to: "https://lhvszlklqqysmbxatlbq.supabase.co"
+   Status: ✓ FIXED
+
+================================================================================
+FEATURES IMPLEMENTED
+================================================================================
+
+1. SUPABASE RISK PRESET MANAGEMENT
+   File: database/supabase_db.py
+   
+   Function: get_active_preset(default_name: str = "moderate") -> Optional[Dict]
+   - Queries the Supabase "risk_presets" table
+   - Fetches preset by preset_name (e.g., "moderate", "conservative", "aggressive")
+   - Normalizes numeric fields to correct Python types (int, float, bool)
+   - Gracefully returns None if Supabase unavailable or query fails
+   - Tries SUPABASE_ANON_KEY first, falls back to SUPABASE_KEY
+   
+   Environment Variables Required:
+   - SUPABASE_URL: https://lhvszlklqqysmbxatlbq.supabase.co
+   - SUPABASE_ANON_KEY: sb_publishable_8SHISZwz_gSgZlYZ5_JlYA_Iaw4wRg2
+   - SUPABASE_KEY: sb_secret_Dnmv92emePFLb4ghWE0VYA_KMVNKrpE (fallback)
+   
+   Usage:
+   ```python
+   from database.supabase_db import get_active_preset
+   config = get_active_preset("moderate")
+   print(config["max_positions"])  # 5
+   print(config["atr_multiplier_sl"])  # 2.0
+   ```
+   
+   Status: ✓ IMPLEMENTED & TESTED
+
+2. BACKTEST RESULT PERSISTENCE
+   File: database/supabase_db.py
+   
+   Function: insert_backtest_result(result: Dict) -> bool
+   - Inserts backtest metrics into Supabase "backtests" table
+   - Filters to only include valid schema columns
+   - Handles foreign key constraints gracefully
+   - Sets coin_id=NULL if coin doesn't exist in coins table
+   - Returns True on success, False on failure
+   
+   Expected Fields:
+   - preset_id (required): Foreign key to risk_presets
+   - coin_id (optional): Foreign key to coins (set to NULL if missing)
+   - run_time (required): ISO datetime string
+   - timeframe: "1h", "4h", "1d", etc.
+   - num_candles: Integer
+   - num_trades: Integer
+   - win_rate: Float (0.0-1.0)
+   - profit_factor: Float
+   - roi: Float (e.g., -0.052 for -5.2%)
+   - max_drawdown: Float (e.g., -0.107)
+   - avg_pnl: Float (average P&L per trade)
+   - passed: Boolean (whether backtest met criteria)
+   
+   Usage:
+   ```python
+   from database.supabase_db import insert_backtest_result
+   from datetime import datetime, timezone
+   
+   result = {
+       "preset_id": 2,
+       "coin_id": 1,
+       "run_time": datetime.now(timezone.utc).isoformat(),
+       "timeframe": "1h",
+       "num_candles": 1000,
+       "num_trades": 31,
+       "win_rate": 0.387,
+       "profit_factor": 0.77,
+       "roi": -0.052,
+       "max_drawdown": -0.107,
+       "avg_pnl": -17,
+       "passed": False
+   }
+   
+   success = insert_backtest_result(result)
+   if success:
+       print("Backtest result saved to Supabase!")
+   ```
+   
+   Status: ✓ IMPLEMENTED & TESTED
+
+3. DATABASE SEEDING HELPER
+   File: database/supabase_db.py
+   
+   Function: seed_coins(coin_list: list = None) -> bool
+   - Populates the "coins" table with cryptocurrency symbols
+   - Default coins: BTC/USDT, ETH/USDT, SOL/USDT
+   - Gracefully handles duplicates (already existing coins)
+   - Required to satisfy foreign key constraints in backtests table
+   
+   Usage:
+   ```python
+   from database.supabase_db import seed_coins
+   
+   # Use default coins
+   seed_coins()
+   
+   # Or provide custom coins
+   custom_coins = [
+       {"symbol": "XRP/USDT", "base_currency": "XRP", "quote_currency": "USDT", "is_active": True},
+       {"symbol": "ADA/USDT", "base_currency": "ADA", "quote_currency": "USDT", "is_active": True},
+   ]
+   seed_coins(custom_coins)
+   ```
+   
+   Status: ✓ IMPLEMENTED & TESTED
+
+================================================================================
+SUPABASE SCHEMA DISCOVERED
+================================================================================
+
+Tables Found in Supabase:
+1. risk_presets (3 rows: conservative, moderate, aggressive)
+   - Columns: id, preset_name, max_positions, position_size_pct, min_trade_size,
+     use_dynamic_sl_tp, atr_multiplier_sl, atr_multiplier_tp, min_risk_reward_ratio,
+     stop_loss_pct, take_profit_pct, trailing_stop_pct, trading_fee_pct, slippage_pct,
+     max_portfolio_risk, max_loss_per_trade_pct, risk_per_trade, created_at
+
+2. coins (needs seeding)
+   - Columns: id, symbol, base_currency, quote_currency, is_active, last_checked
+
+3. signals (ready for use)
+4. trades (ready for use)
+5. positions (ready for use)
+6. backtests (ready - has FK to coins and risk_presets)
+
+================================================================================
+FILES MODIFIED
+================================================================================
+
+1. risk/dynamic_risk.py
+   - Added: from pathlib import Path
+   - Changed: RISK_CONFIG_PATH → RISK_CONFIG_FILE
+
+2. main_enhanced.py
+   - Changed: Wrapped supabase_db import in try-except for graceful failure
+
+3. database/supabase_db.py
+   - Created file (was empty)
+   - Implemented: get_active_preset()
+   - Implemented: insert_backtest_result()
+   - Implemented: seed_coins()
+   - Implemented: _normalize_preset() (helper)
+
+4. .env
+   - Fixed: SUPABASE_URL (removed duplicate https://)
+   - Added/Verified: SUPABASE_ANON_KEY
+   - Added: SUPABASE_KEY (secret key for fallback)
+
+================================================================================
+FILES CREATED
+================================================================================
+
+1. test_supabase_debug.py
+   - Debug script to test Supabase connectivity
+   - Queries all known table names
+   - Tests both anon and secret keys
+   - Shows schema discovery output
+
+2. debug_backtest_insert.py
+   - Verbose debug script for backtest insertion
+   - Shows foreign key constraint errors
+   - Helps diagnose Supabase issues
+
+3. test_backtest_insert.py
+   - Simple test for insert_backtest_result()
+   - Uses valid schema-matching data
+
+4. test_backtest_full.py
+   - Full integration test
+   - Seeds coins first, then inserts backtest
+   - Verifies end-to-end workflow
+
+================================================================================
+INTEGRATION PATTERNS
+================================================================================
+
+1. FETCH RISK PRESET AT BOT STARTUP
+   Location: main_enhanced.py (lines 210-217)
+   
+   Code:
+   ```python
+   supabase_config = None
+   if get_active_preset:
+       try:
+           supabase_config = get_active_preset("moderate")
+       except Exception:
+           supabase_config = None
+   
+   if supabase_config:
+       config = supabase_config
+   else:
+       config = load_config()  # Fallback to local
+   ```
+
+2. PERSIST BACKTEST RESULTS IN FINALLY BLOCK
+   Pattern (use in run_backtest_simple.py):
+   
+   ```python
+   from database.supabase_db import insert_backtest_result, seed_coins
+   
+   try:
+       result = run_backtest(...)
+       result["status"] = "success"
+       # ... add metrics
+   except Exception as e:
+       result = {
+           "status": "failed",
+           "error_message": str(e),
+           "preset_id": current_preset_id,
+       }
+   finally:
+       # This ensures it ALWAYS sends, even on crash
+       insert_backtest_result(result)
+   ```
+
+3. INITIALIZE DATABASE ON FIRST RUN
+   Pattern:
+   
+   ```python
+   from database.supabase_db import seed_coins
+   
+   # Call once at startup
+   seed_coins()
+   ```
+
+================================================================================
+TESTING & VERIFICATION
+================================================================================
+
+✓ Import Test: main_enhanced.py imports successfully
+  Command: python -c "from main_enhanced import main; print('✓ All imports successful')"
+  Result: Success
+
+✓ get_active_preset() Test: Returns "moderate" preset from Supabase
+  Result: {'id': 2, 'preset_name': 'moderate', 'max_positions': 5, 'position_size_pct': 0.1, ...}
+
+✓ seed_coins() Test: Populates coins table
+  Result: 3 coins seeded (BTC/USDT, ETH/USDT, SOL/USDT)
+
+✓ insert_backtest_result() Test: Inserts backtest metrics
+  Result: Successfully inserted record into backtests table
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. INTEGRATE INTO run_backtest_simple.py
+   - Seed coins on startup: seed_coins()
+   - Wrap backtest in try-finally to persist results
+   - Add preset_id, coin_id, and other metrics to insert call
+
+2. INTEGRATE INTO run_with_risk_preset.py
+   - Already fetches risk config from Supabase (if available)
+   - Consider adding backtest result logging
+
+3. CREATE SQL MIGRATION FILE
+   - The schema from the user's SQL CREATE TABLE statements
+   - Deploy to Supabase via SQL editor
+
+4. ADD ROW LEVEL SECURITY (RLS)
+   - Consider adding RLS policies to Supabase tables
+   - Protect sensitive data from unauthorized access
+
+5. MONITORING & ANALYTICS
+   - Query backtests table for performance trends
+   - Track which presets perform best
+   - Monitor win rates and ROI over time
+
+================================================================================
+ENVIRONMENT VARIABLES (.env)
+================================================================================
+
+Required for Supabase Integration:
+SUPABASE_URL=https://lhvszlklqqysmbxatlbq.supabase.co
+SUPABASE_ANON_KEY=sb_publishable_8SHISZwz_gSgZlYZ5_JlYA_Iaw4wRg2
+SUPABASE_KEY=sb_secret_Dnmv92emePFLb4ghWE0VYA_KMVNKrpE
+
+Optional (for alerts):
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Issue: "Foreign key constraint violation" on backtest insert
+Fix: Call seed_coins() first to populate coins table
+     OR use coin_id=NULL in result dict
+
+Issue: "Could not find the table 'backtests'" 
+Fix: Run the SQL CREATE TABLE statements in Supabase SQL editor
+
+Issue: get_active_preset() returns None
+Fix: Verify .env has correct SUPABASE_URL and SUPABASE_ANON_KEY
+     Check that risk_presets table exists and has data
+
+Issue: Connection refused from Supabase
+Fix: Verify SUPABASE_URL format (should be https://... not https://https://...)
+     Check internet connectivity
+     Verify Supabase project is active
+
+================================================================================
+DEPENDENCIES
+================================================================================
+
+New packages installed:
+- supabase (for Supabase client)
+- ccxt (for OHLCV data fetching)
+
+Existing packages used:
+- python-dotenv (for .env file loading)
+- pathlib (for Path operations)
+- json (for JSON parsing)
+- os (for environment variables)
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
