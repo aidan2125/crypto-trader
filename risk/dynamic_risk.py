@@ -3,9 +3,8 @@ Dynamic Risk Management
 Adjusts stop loss and take profit based on market volatility (ATR)
 """
 
-import json
-from pathlib import Path
 import os
+import json
 from datetime import datetime
 
 RISK_CONFIG_FILE = Path("data") / "risk_config.json"
@@ -174,6 +173,19 @@ def save_enhanced_risk_config(config):
     RISK_CONFIG_FILE.parent.mkdir(exist_ok=True)
     with open(RISK_CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=4)
+
+# Persist config (keep as backup). Writes a timestamped backup and optionally updates main file.
+def save_risk_config_backup(config: dict, path: str = RISK_CONFIG_PATH, keep_main: bool = False):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    backup_dir = os.path.join(os.path.dirname(path) or ".", "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    backup_path = os.path.join(backup_dir, f"{os.path.basename(path)}.{ts}.json")
+    with open(backup_path, "w") as f:
+        json.dump(config, f, indent=4)
+    if keep_main:
+        with open(path, "w") as f:
+            json.dump(config, f, indent=4)
 
 def analyze_trade_risk(entry_price, stop_loss, take_profit, position_size, account_balance):
     """
