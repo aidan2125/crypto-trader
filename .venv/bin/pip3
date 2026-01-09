@@ -1,4 +1,4 @@
-#!/home/aidan/crypto-trader/.venv/bin/python
+#!/home/aidan/Desktop/crypto-trader/.venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys
