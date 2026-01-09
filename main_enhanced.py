@@ -20,12 +20,11 @@ from alerts.discord_alerts import send_discord_message
 from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
 
+# New: load active preset from Supabase (optional)
+from database.supabase_db import get_active_preset
+
 # CORRECT IMPORT — file is risk/dynamic_risk.py
-from risk.dynamic_risk import (
-    load_enhanced_risk_config as load_config,
-    save_enhanced_risk_config as save_config,
-    ENHANCED_RISK_CONFIG
-)
+from risk.dynamic_risk import load_enhanced_risk_config as load_config
 
 # Ensure directories
 os.makedirs("logs", exist_ok=True)
@@ -86,7 +85,7 @@ def run_for_coin(coin: str):
         try:
             plot_signals(df, filename=f"{coin.replace('/', '_')}_signals.png")
         except Exception as e:
-            logging.exception(f"{coin}: Plot error")
+            logging.error(f"{coin}: Plot error: {e}")
 
         current_signal = int(df["signal"].iloc[-1])
         price = float(df["close"].iloc[-1])
@@ -156,7 +155,7 @@ def run_for_coin(coin: str):
             logging.info(f"{coin}: No change (signal {current_signal})")
 
     except Exception as e:
-        logging.exception(f"{coin} error")
+        logging.error(f"{coin} error: {e}")
         print(f"ERROR {coin}: {e}")
 
 
@@ -198,15 +197,29 @@ def check_all_positions_for_exits():
                     execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
                     
             except Exception as e:
-                logging.exception(f"Error checking position {coin}")
+                logging.error(f"Error checking position {coin}: {e}")
                 
     except Exception as e:
-        logging.exception(f"Error in check_all_positions_for_exits")
+        logging.error(f"Error in check_all_positions_for_exits: {e}")
 
 
 def main(continuous: bool = False, interval: int = 300):
     run_count = 0
-    config = load_config()
+
+    # Prefer active preset from Supabase if available, fall back to local config
+    try:
+        supabase_config = get_active_preset("moderate")
+    except Exception:
+        supabase_config = None
+
+    if supabase_config:
+        config = supabase_config
+        print("Risk Config from Supabase:")
+        print(f"  Max Positions: {config['max_positions']}")
+        print(f"  Risk/Trade: {config['risk_per_trade']*100:.1f}%")
+        print(f"  ATR SL/TP: {config['atr_multiplier_sl']}x / {config['atr_multiplier_tp']}x")
+    else:
+        config = load_config()
 
     while True:
         run_count += 1
