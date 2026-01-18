@@ -19,6 +19,8 @@ from alerts.email_alerts import send_email
 from alerts.discord_alerts import send_discord_message
 from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
+from run_backtest_simple import load_risk_config, BacktestPro
+
 
 # New: load active preset from Supabase (optional)
 try:
@@ -205,8 +207,61 @@ def check_all_positions_for_exits():
     except Exception as e:
         logging.error(f"Error in check_all_positions_for_exits: {e}")
 
+def run_startup_backtest_check():
+    """
+    Runs your professional BacktestPro class as a startup health check.
+    Uses the same risk config as the live bot.
+    """
+    print("\n" + "═" * 80)
+    print(" STARTUP BACKTEST HEALTH CHECK ".center(80))
+    print("═" * 80 + "\n")
+
+    try:
+        # Load the same risk config the live bot will use
+        risk_config = load_risk_config()
+
+        # Choose one or two major symbols for quick validation
+        symbol = "BTC/USDT"  # you can also do ["BTC/USDT", "ETH/USDT"]
+        timeframe = "1h"     # ← change to match your live strategy timeframe
+        limit = 3000         # enough for ~4-5 months on 1h
+
+        print(f"Fetching historical data for backtest ({symbol}, {timeframe})...")
+        df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+
+        if df is None or df.empty:
+            print("→ Failed to fetch backtest data. Skipping health check.")
+            return None
+
+        print(f"Applying strategy to {len(df)} candles...")
+        df = enhanced_strategy(df)
+
+        print("Running backtest simulation...")
+        backtester = BacktestPro(initial_balance=10000, risk_config=risk_config)
+        backtester.run(df, symbol=symbol, strategy_name="Enhanced Strategy")
+
+        # Optional: basic safety gate
+        final_balance = backtester.balance
+        roi = (final_balance / 10000 - 1) * 100
+        if roi < -30:
+            msg = f"WARNING: Backtest shows heavy loss ({roi:.1f}%). Consider reviewing strategy."
+            print("\n" + msg + "\n")
+            logging.warning(msg)
+            # send_all_alerts(msg)  # ← uncomment if you want alert
+
+        print("\n→ Backtest completed. Proceeding to live/paper mode...\n")
+        return {"status": "ok", "final_balance": final_balance, "roi": roi}
+
+    except Exception as e:
+        logging.error(f"Startup backtest failed: {e}")
+        print(f"Backtest error: {e}")
+        print("→ Continuing to live mode anyway...\n")
+        return None
+
 
 def main(continuous: bool = False, interval: int = 300):
+    # Run backtest health check at every startup/restart
+    backtest_result = run_startup_backtest_check()
+
     run_count = 0
 
     # Prefer active preset from Supabase if available, fall back to local config

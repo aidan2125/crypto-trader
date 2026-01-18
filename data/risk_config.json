@@ -1,17 +1,17 @@
 {
-    "max_positions": 5,
-    "position_size_pct": 0.1,
+    "max_positions": 8,
+    "position_size_pct": 0.15,
     "min_trade_size": 10,
     "use_dynamic_sl_tp": true,
-    "atr_multiplier_sl": 2.0,
-    "atr_multiplier_tp": 3.0,
+    "atr_multiplier_sl": 2.5,
+    "atr_multiplier_tp": 4.0,
     "min_risk_reward_ratio": 1.5,
-    "stop_loss_pct": 0.02,
-    "take_profit_pct": 0.05,
-    "trailing_stop_pct": 0.03,
+    "stop_loss_pct": 0.03,
+    "take_profit_pct": 0.1,
+    "trailing_stop_pct": 0.05,
     "trading_fee_pct": 0.001,
     "slippage_pct": 0.0005,
     "max_portfolio_risk": 0.2,
     "max_loss_per_trade_pct": 0.02,
-    "risk_per_trade": 0.02
+    "risk_per_trade": 0.03
 }

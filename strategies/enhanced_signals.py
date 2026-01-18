@@ -51,18 +51,18 @@ def enhanced_strategy(df, config=None):
     """
     if config is None:
         config = {
-            "fast_ma": 5,              # Faster: was 10
-            "slow_ma": 18,             # Faster: was 30
-            "rsi_period": 7,
-            "rsi_oversold": 45,        # Relaxed: was 30
-            "rsi_overbought": 55,      # Relaxed: was 70
-            "atr_period": 10,
-            "atr_multiplier_sl": 1.0,
-            "atr_multiplier_tp": 1.5,
+            "fast_ma": 20,              # Faster: was 10
+            "slow_ma": 50,             # Faster: was 30
+            "rsi_period": 14,
+            "rsi_oversold": 30,        # Relaxed: was 30
+            "rsi_overbought": 70,      # Relaxed: was 70
+            "atr_period": 14,
+            "atr_multiplier_sl": 1.5,
+            "atr_multiplier_tp": 3.0,
             "atr_multiplier_trailing": 1.0,
-            "min_volume_ratio": 0.5,   # Relaxed: was 1.0
-            "use_volume_filter": False, # Disabled for more signals
-            "min_signal_quality": 20   # Relaxed: was 60
+            "min_volume_ratio": 1.5,   # Relaxed: was 1.0
+            "use_volume_filter": True, # Disabled for more signals
+            "min_signal_quality": 50   # Relaxed: was 60
         }
     
     df = df.copy()

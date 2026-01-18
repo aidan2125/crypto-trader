@@ -19,8 +19,8 @@ Repeats every few minutes.
 Usage:
     python run_with_risk_preset.py <preset> [interval_minutes]
 
-Examples:
-    python run_with_risk_preset.py moderate
+Examples:python run_with_risk_preset.py moderate
+    
     python run_with_risk_preset.py aggressive 3
     python run_with_risk_preset.py conservative 5
 """
