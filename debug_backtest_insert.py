@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
 load_dotenv()
 
 url = os.getenv("SUPABASE_URL")
-key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 print(f"URL: {url}")
 print(f"Key: {key[:20]}..." if key else "Key: None")
