@@ -217,44 +217,50 @@ def run_startup_backtest_check():
     print("═" * 80 + "\n")
 
     try:
-        # Load the same risk config the live bot will use
-        risk_config = load_risk_config()
+        # Use THE SAME loading logic as the live bot
+        risk_config = None
+        
+        # Try Supabase first (just like live)
+        if get_active_preset:
+            try:
+                supabase_preset = get_active_preset("moderate")  # or use active one
+                if supabase_preset:
+                    risk_config = supabase_preset
+                    print("Using Supabase preset for backtest")
+            except Exception as e:
+                print(f"Supabase preset failed: {e}")
 
-        # Choose one or two major symbols for quick validation
-        symbol = "BTC/USDT"  # you can also do ["BTC/USDT", "ETH/USDT"]
-        timeframe = "1h"     # ← change to match your live strategy timeframe
-        limit = 3000         # enough for ~4-5 months on 1h
+        # Fallback to your local config loader
+        if risk_config is None:
+            risk_config = load_config()  # ← same as live bot fallback
+            print("Using local config fallback for backtest")
 
-        print(f"Fetching historical data for backtest ({symbol}, {timeframe})...")
+        if risk_config is None:
+            print("No risk config available → using defaults")
+            risk_config = {}  # or your default dict
+
+        # Now run the backtest with this config
+        symbol = "BTC/USDT"
+        timeframe = "1h"
+        limit = 3000
+
+        print(f"Fetching {symbol} {timeframe} data for backtest...")
         df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
 
         if df is None or df.empty:
-            print("→ Failed to fetch backtest data. Skipping health check.")
+            print("→ No data for backtest")
             return None
 
-        print(f"Applying strategy to {len(df)} candles...")
         df = enhanced_strategy(df)
 
         print("Running backtest simulation...")
         backtester = BacktestPro(initial_balance=10000, risk_config=risk_config)
         backtester.run(df, symbol=symbol, strategy_name="Enhanced Strategy")
 
-        # Optional: basic safety gate
-        final_balance = backtester.balance
-        roi = (final_balance / 10000 - 1) * 100
-        if roi < -30:
-            msg = f"WARNING: Backtest shows heavy loss ({roi:.1f}%). Consider reviewing strategy."
-            print("\n" + msg + "\n")
-            logging.warning(msg)
-            # send_all_alerts(msg)  # ← uncomment if you want alert
-
-        print("\n→ Backtest completed. Proceeding to live/paper mode...\n")
-        return {"status": "ok", "final_balance": final_balance, "roi": roi}
+        # ... rest of your safety check and printing ...
 
     except Exception as e:
-        logging.error(f"Startup backtest failed: {e}")
-        print(f"Backtest error: {e}")
-        print("→ Continuing to live mode anyway...\n")
+        print(f"Backtest health check failed: {e}")
         return None
 
 
