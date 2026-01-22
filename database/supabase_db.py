@@ -61,6 +61,7 @@ def insert_backtest_result(backtest_data: dict) -> bool:
         import traceback
         traceback.print_exc()
         return False
+    
 
 
 def get_or_create_coin(symbol: str) -> int | None:

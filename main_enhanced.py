@@ -9,6 +9,7 @@ import time
 import json
 import argparse
 from datetime import datetime
+import pandas as pd
 
 from data.multi_coin_list import COIN_CURRENCY
 from data.market_data import fetch_ohlcv
@@ -19,19 +20,22 @@ from alerts.email_alerts import send_email
 from alerts.discord_alerts import send_discord_message
 from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
-from run_backtest_simple import load_risk_config, BacktestPro
 
+# Import BacktestPro from run_backtest_simple (supports risk_config dict)
+from run_backtest_simple import BacktestPro
 
-# New: load active preset from Supabase (optional)
+# Supabase integration
 try:
-    from database.supabase_db import get_active_preset
+    from database.supabase_db import get_active_preset, insert_backtest_result
 except ImportError:
     get_active_preset = None
+    insert_backtest_result = None
+    print("Warning: Supabase integration not available")
 
-# CORRECT IMPORT — file is risk/dynamic_risk.py
+# Risk config
 from risk.dynamic_risk import load_enhanced_risk_config as load_config
 
-# Ensure directories
+# Directories
 os.makedirs("logs", exist_ok=True)
 os.makedirs("reports", exist_ok=True)
 
@@ -86,7 +90,6 @@ def run_for_coin(coin: str):
             logging.warning(f"{coin}: No signal generated")
             return
 
-        # Plot
         try:
             plot_signals(df, filename=f"{coin.replace('/', '_')}_signals.png")
         except Exception as e:
@@ -95,12 +98,10 @@ def run_for_coin(coin: str):
         current_signal = int(df["signal"].iloc[-1])
         price = float(df["close"].iloc[-1])
         
-        # FIXED: Extract ATR from strategy output
         atr = None
         if "atr" in df.columns and not df["atr"].isna().iloc[-1]:
             atr = float(df["atr"].iloc[-1])
         
-        # Get signal quality if available
         signal_quality = None
         if "signal_quality" in df.columns and not df["signal_quality"].isna().iloc[-1]:
             signal_quality = float(df["signal_quality"].iloc[-1])
@@ -113,19 +114,17 @@ def run_for_coin(coin: str):
         previous_signal = last_signals.get(coin)
 
         if current_signal != previous_signal:
-            # FIXED: Pass ATR to paper trader
             trade_result = execute_paper_trade(
                 coin=coin,
                 signal=current_signal,
                 price=price,
                 currency=currency,
-                atr=atr  # Now includes ATR for dynamic SL/TP
+                atr=atr
             )
 
             signal_names = {-1: "SELL", 0: "HOLD", 1: "BUY"}
             signal_name = signal_names.get(current_signal, str(current_signal))
 
-            # Enhanced message with ATR and quality info
             message_parts = [
                 f"**SIGNAL CHANGE**",
                 f"Coin: {coin}",
@@ -165,10 +164,6 @@ def run_for_coin(coin: str):
 
 
 def check_all_positions_for_exits():
-    """
-    Check all open positions for stop loss or take profit hits.
-    This runs independently of signal changes for better risk management.
-    """
     try:
         from execution.enhanced_paper_trader import load_json, POSITIONS_FILE
         
@@ -179,7 +174,6 @@ def check_all_positions_for_exits():
         
         for coin, position in list(positions.items()):
             try:
-                # Fetch current price
                 df = fetch_ohlcv(symbol=coin, limit=1)
                 if df is None or df.empty:
                     continue
@@ -187,10 +181,8 @@ def check_all_positions_for_exits():
                 current_price = float(df["close"].iloc[-1])
                 sl = position.get("stop_loss")
                 tp = position.get("take_profit")
-                entry = position.get("entry_price")
                 currency = position.get("currency", DEFAULT_CURRENCY)
                 
-                # Check for SL/TP hits
                 if sl and current_price <= sl:
                     logging.info(f"{coin}: Stop Loss hit at ${current_price:.2f}")
                     print(f"\n[AUTO EXIT] {coin} Stop Loss hit!")
@@ -207,39 +199,33 @@ def check_all_positions_for_exits():
     except Exception as e:
         logging.error(f"Error in check_all_positions_for_exits: {e}")
 
+
 def run_startup_backtest_check():
-    """
-    Runs your professional BacktestPro class as a startup health check.
-    Uses the same risk config as the live bot.
-    """
     print("\n" + "═" * 80)
     print(" STARTUP BACKTEST HEALTH CHECK ".center(80))
     print("═" * 80 + "\n")
 
     try:
-        # Use THE SAME loading logic as the live bot
         risk_config = None
         
-        # Try Supabase first (just like live)
         if get_active_preset:
             try:
-                supabase_preset = get_active_preset("moderate")  # or use active one
+                supabase_preset = get_active_preset("moderate")
                 if supabase_preset:
                     risk_config = supabase_preset
+                    print("✓ Loaded 'moderate' preset from Supabase")
                     print("Using Supabase preset for backtest")
             except Exception as e:
                 print(f"Supabase preset failed: {e}")
 
-        # Fallback to your local config loader
         if risk_config is None:
-            risk_config = load_config()  # ← same as live bot fallback
+            risk_config = load_config()
             print("Using local config fallback for backtest")
 
         if risk_config is None:
             print("No risk config available → using defaults")
-            risk_config = {}  # or your default dict
+            risk_config = {}
 
-        # Now run the backtest with this config
         symbol = "BTC/USDT"
         timeframe = "1h"
         limit = 3000
@@ -257,20 +243,60 @@ def run_startup_backtest_check():
         backtester = BacktestPro(initial_balance=10000, risk_config=risk_config)
         backtester.run(df, symbol=symbol, strategy_name="Enhanced Strategy")
 
-        # ... rest of your safety check and printing ...
+        # Save backtest result to Supabase
+        if insert_backtest_result:
+            print("\nSaving startup backtest result to Supabase...")
+
+            try:
+                df_trades = pd.DataFrame(backtester.trades) if backtester.trades else pd.DataFrame()
+                total_pnl = float(df_trades['pnl'].sum()) if not df_trades.empty else 0.0
+                roi = float((backtester.balance / backtester.initial_balance - 1)) if backtester.initial_balance != 0 else 0.0
+                win_rate = float((df_trades['pnl'] > 0).mean()) if not df_trades.empty else 0.0
+                gross_profit = float(df_trades[df_trades['pnl'] > 0]['pnl'].sum()) if not df_trades.empty else 0.0
+                gross_loss = float(abs(df_trades[df_trades['pnl'] <= 0]['pnl'].sum())) if not df_trades.empty else 0.0
+                profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else 0.0
+                equity_curve = pd.Series([backtester.initial_balance] + backtester.equity)
+                max_dd = float((equity_curve / equity_curve.cummax() - 1).min()) if len(equity_curve) > 1 else 0.0
+                avg_pnl = float(df_trades['pnl'].mean()) if not df_trades.empty else 0.0
+
+                result = {
+                    "preset_id": int(2),
+                    "coin_id": int(1),
+                    "run_time": datetime.now().isoformat(),
+                    "timeframe": str(timeframe),
+                    "num_candles": int(len(df)),
+                    "num_trades": int(len(backtester.trades)),
+                    "win_rate": win_rate,
+                    "profit_factor": profit_factor,
+                    "roi": roi,
+                    "max_drawdown": max_dd,
+                    "avg_pnl": avg_pnl,
+                    "passed": bool(roi > 0)
+                }
+
+                success = insert_backtest_result(result)
+                print(f"Startup backtest saved successfully: {success}")
+
+            except Exception as e:
+                print(f"Startup backtest save failed: {e}")
+                import traceback
+                traceback.print_exc()
+
+        return None
 
     except Exception as e:
         print(f"Backtest health check failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
 def main(continuous: bool = False, interval: int = 300):
-    # Run backtest health check at every startup/restart
-    backtest_result = run_startup_backtest_check()
+    # Run backtest health check at startup
+    run_startup_backtest_check()
 
     run_count = 0
 
-    # Prefer active preset from Supabase if available, fall back to local config
     supabase_config = None
     if get_active_preset:
         try:
@@ -280,10 +306,9 @@ def main(continuous: bool = False, interval: int = 300):
 
     if supabase_config:
         config = supabase_config
-        print("Risk Config from Supabase:")
+        print("\nRisk Config from Supabase:")
         print(f"  Max Positions: {config['max_positions']}")
         print(f"  Risk/Trade: {config['risk_per_trade']*100:.1f}%")
-        print(f"  ATR SL/TP: {config['atr_multiplier_sl']}x / {config['atr_multiplier_tp']}x")
     else:
         config = load_config()
 
@@ -298,13 +323,11 @@ def main(continuous: bool = False, interval: int = 300):
         print(f"  Max Risk/Trade: {config.get('max_loss_per_trade_pct', 0.02)*100:.1f}%")
         print(f"  ATR SL: {config.get('atr_multiplier_sl', 2.0)}× | TP: {config.get('atr_multiplier_tp', 3.0)}×\n")
 
-        # Process each coin for signals
         for coin in COIN_CURRENCY:
             print(f"→ {coin}")
             run_for_coin(coin)
             time.sleep(1)
 
-        # FIXED: Check all open positions for SL/TP exits
         print("\n→ Checking open positions for exits...")
         check_all_positions_for_exits()
 
