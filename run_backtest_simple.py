@@ -1,24 +1,27 @@
-# run_backtest_simple.py
+#!/usr/bin/env python3
 """
 Standalone Backtester for Crypto Trader Project
 - Fully self-contained (no import/package issues)
 - Uses your existing enhanced_strategy and fetch_ohlcv
 - Integrates with your risk_config.json presets
 - Professional output with trades, PnL, ROI, drawdown
+- Now saves results to Supabase after backtest
 
 Run with:
     python run_backtest_simple.py
 
 Compatible with your run_with_risk_preset.py workflow:
 1. Run preset applier → updates data/risk_config.json
-2. Run this backtest → uses the same risk settings
+2. Run this backtest → uses the same risk settings + saves to DB
 """
 
 import pandas as pd
 import json
 from pathlib import Path
+from datetime import datetime
 from data.market_data import fetch_ohlcv
 from strategies.enhanced_signals import enhanced_strategy  # Your strategy function
+from database.supabase_db import insert_backtest_result  # Supabase save function
 
 # Load risk config to sync with your live bot presets
 RISK_CONFIG_PATH = Path("data") / "risk_config.json"
@@ -205,7 +208,6 @@ class BacktestPro:
         print(f"Avg PnL/Trade    : ${df_trades['pnl'].mean():+.0f}")
         print("═" * 70)
 
-
 # === MAIN EXECUTION ===
 if __name__ == "__main__":
     # Load your active risk preset
@@ -214,7 +216,7 @@ if __name__ == "__main__":
     # Configuration
     symbol = "BTC/USDT"
     timeframe = "1h"
-    limit = 5000  # Adjust based on your exchange API  2000
+    limit = 5000  # Adjust based on your exchange API limit
 
     print("Fetching market data...")
     df = fetch_ohlcv(symbol, timeframe, limit)
@@ -228,3 +230,45 @@ if __name__ == "__main__":
 
         backtester = BacktestPro(initial_balance=10000, risk_config=risk_config)
         backtester.run(df, symbol=symbol, strategy_name="Enhanced Strategy")
+
+        # ────────────────────────────────────────────────
+        # SAVE BACKTEST RESULT TO SUPABASE
+        # ────────────────────────────────────────────────
+        print("\nSaving backtest result to Supabase...")
+
+        try:
+            df_trades = pd.DataFrame(backtester.trades) if backtester.trades else pd.DataFrame()
+            total_pnl = df_trades['pnl'].sum() if not df_trades.empty else 0
+            roi = (backtester.balance / backtester.initial_balance - 1) if backtester.initial_balance != 0 else 0
+            win_rate = (df_trades['pnl'] > 0).mean() if not df_trades.empty else 0.0
+            gross_profit = df_trades[df_trades['pnl'] > 0]['pnl'].sum() if not df_trades.empty else 0
+            gross_loss = abs(df_trades[df_trades['pnl'] <= 0]['pnl'].sum()) if not df_trades.empty else 0
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+            equity_curve = pd.Series([backtester.initial_balance] + backtester.equity)
+            max_dd = (equity_curve / equity_curve.cummax() - 1).min() if len(equity_curve) > 1 else 0.0
+
+            result = {
+                "preset_id": int(2),
+                "coin_id": int(1),
+                "run_time": datetime.now().isoformat(),
+                "timeframe": str(timeframe),
+                "num_candles": int(len(df)),
+                "num_trades": int(len(backtester.trades)),
+                "win_rate": float(win_rate),
+                "profit_factor": float(profit_factor),
+                "roi": float(roi),
+                "max_drawdown": float(max_dd),
+                "avg_pnl": float(df_trades['pnl'].mean() if not df_trades.empty else 0),
+            
+            }
+
+            success = insert_backtest_result(result)
+            print("Saved successfully:", success)
+
+        except ImportError as e:
+            print(f"✗ Could not import insert_backtest_result: {e}")
+            print("   Make sure database/supabase_db.py exists and has the function")
+        except Exception as e:
+            print(f"✗ Failed to save to Supabase: {e}")
+            import traceback
+            traceback.print_exc()
