@@ -3,235 +3,274 @@ Balanced Trading Strategy - Optimized for Real Market Testing
 More signals, reasonable filters, good for stress testing
 """
 
-import pandas as pd
-import numpy as np
+import polars as pl
 import json
 from pathlib import Path
 
-def calculate_rsi(series, period=14):
+def calculate_rsi(series: pl.Expr, period: int = 14) -> pl.Expr:
     delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    
+    gain = delta.clip(lower_bound=0)
+    loss = (-delta).clip(lower_bound=0)
+
+    avg_gain = gain.rolling_mean(window_size=period, min_periods=period)
+    avg_loss = loss.rolling_mean(window_size=period, min_periods=period)
+
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
+
+def calculate_atr(df: pl.DataFrame, period: int = 14) -> pl.Expr:
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift(1)).abs()
+    low_close = (df["low"] - df["close"].shift(1)).abs()
+
+    tr = pl.max_horizontal(high_low, high_close, low_close)
+    atr = tr.rolling_mean(window_size=period, min_periods=period)
     return atr
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
-    """MACD for momentum confirmation"""
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
+
+def calculate_macd(
+    close: pl.Expr,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9
+) -> tuple[pl.Expr, pl.Expr, pl.Expr]:
+    ema_fast = close.ewm_mean(span=fast, adjust=False)
+    ema_slow = close.ewm_mean(span=slow, adjust=False)
     macd = ema_fast - ema_slow
-    macd_signal = macd.ewm(span=signal, adjust=False).mean()
+    macd_signal = macd.ewm_mean(span=signal, adjust=False)
     macd_hist = macd - macd_signal
     return macd, macd_signal, macd_hist
 
-def enhanced_strategy(df, config=None):
+
+def enhanced_strategy(df: pl.DataFrame, config: dict = None) -> pl.DataFrame:
     """
     Balanced Strategy for Real Market Testing
-    
-    Key Changes:
-    - Relaxed RSI thresholds (40/60 instead of 30/70)
-    - Shorter MA periods for faster signals
-    - Multiple signal types (MA cross, RSI extremes, MACD)
-    - Minimum quality scoring but not too strict
-    - Volume filter optional
     """
     if config is None:
         config = {
-            "fast_ma": 20,              # Faster: was 10
-            "slow_ma": 50,             # Faster: was 30
+            "fast_ma": 20,
+            "slow_ma": 50,
             "rsi_period": 14,
-            "rsi_oversold": 30,        # Relaxed: was 30
-            "rsi_overbought": 70,      # Relaxed: was 70
+            "rsi_oversold": 30,
+            "rsi_overbought": 70,
             "atr_period": 14,
             "atr_multiplier_sl": 1.5,
             "atr_multiplier_tp": 3.0,
             "atr_multiplier_trailing": 1.0,
-            "min_volume_ratio": 1.5,   # Relaxed: was 1.0
-            "use_volume_filter": True, # Disabled for more signals
-            "min_signal_quality": 50   # Relaxed: was 60
+            "min_volume_ratio": 1.5,
+            "use_volume_filter": True,
+            "min_signal_quality": 50
         }
-    
-    df = df.copy()
-    
-    # Core Indicators
-    df['ma_fast'] = df['close'].rolling(window=config['fast_ma']).mean()
-    df['ma_slow'] = df['close'].rolling(window=config['slow_ma']).mean()
-    df['rsi'] = calculate_rsi(df['close'], config['rsi_period'])
-    df['atr'] = calculate_atr(df, config['atr_period'])
-    # Defensive: ensure ATR is numeric (avoid accidental dict/object types)
-    df['atr'] = pd.to_numeric(df['atr'], errors='coerce')
-    # Replace zero ATR with NaN to avoid division-by-zero or meaningless sizing
-    # Use assignment form to avoid pandas chained-assignment FutureWarning
-    df['atr'] = df['atr'].replace(0, np.nan)
-    
-    # MACD for momentum
-    df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(df['close'])
-    
-    # Volume analysis (optional)
-    if 'volume' in df.columns and config['use_volume_filter']:
-        df['avg_volume'] = df['volume'].rolling(20).mean()
-        df['volume_ratio'] = df['volume'] / df['avg_volume']
+
+    # 1. Core Indicators
+    df = df.with_columns([
+        pl.col("close").rolling_mean(window_size=config["fast_ma"]).alias("ma_fast"),
+        pl.col("close").rolling_mean(window_size=config["slow_ma"]).alias("ma_slow"),
+        calculate_rsi(pl.col("close"), config["rsi_period"]).alias("rsi"),
+        calculate_atr(df, config["atr_period"]).alias("atr"),
+        calculate_macd(pl.col("close"))[0].alias("macd"),
+        calculate_macd(pl.col("close"))[1].alias("macd_signal"),
+        calculate_macd(pl.col("close"))[2].alias("macd_hist"),
+    ])
+
+    # 2. Volume analysis
+    if "volume" in df.columns and config["use_volume_filter"]:
+        df = df.with_columns(
+            pl.col("volume")
+              .rolling_mean(window_size=20, min_periods=1)
+              .alias("avg_volume")
+        )
+        df = df.with_columns(
+            (pl.col("volume") / pl.col("avg_volume"))
+              .alias("volume_ratio")
+        )
     else:
-        df['volume_ratio'] = 1.0
-    
-    # Price momentum
-    df['price_change'] = df['close'].pct_change()
-    df['momentum_5'] = df['close'].pct_change(5)
-    
-    # Trend identification
-    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['uptrend'] = df['close'] > df['ema_50']
-    df['downtrend'] = df['close'] < df['ema_50']
-    
-    # MA Crossovers
-    df['cross_up'] = (df['ma_fast'] > df['ma_slow']) & (df['ma_fast'].shift(1) <= df['ma_slow'].shift(1))
-    df['cross_down'] = (df['ma_fast'] < df['ma_slow']) & (df['ma_fast'].shift(1) >= df['ma_slow'].shift(1))
-    
-    # MACD Crossovers
-    df['macd_cross_up'] = (df['macd'] > df['macd_signal']) & (df['macd'].shift(1) <= df['macd_signal'].shift(1))
-    df['macd_cross_down'] = (df['macd'] < df['macd_signal']) & (df['macd'].shift(1) >= df['macd_signal'].shift(1))
-    
-    # Initialize signals
-    df['raw_signal'] = 0
-    df['signal_type'] = ''
-    
-    # ===== MULTIPLE ENTRY CONDITIONS =====
-    
-    # 1. MA Crossover Strategy (Primary)
+        df = df.with_columns(pl.lit(1.0).alias("volume_ratio"))
+
+    # 3. Price momentum & trend
+    df = df.with_columns([
+        pl.col("close").pct_change().alias("price_change"),
+        pl.col("close").pct_change(n=5).alias("momentum_5")
+    ])
+
+    df = df.with_columns(
+        pl.col("close").ewm_mean(span=50, adjust=False).alias("ema_50")
+    )
+
+    df = df.with_columns([
+        (pl.col("close") > pl.col("ema_50")).alias("uptrend"),
+        (pl.col("close") < pl.col("ema_50")).alias("downtrend")
+    ])
+
+    # 4. Crossovers
+    df = df.with_columns([
+        ((pl.col("ma_fast") > pl.col("ma_slow")) &
+         (pl.col("ma_fast").shift(1) <= pl.col("ma_slow").shift(1))).alias("cross_up"),
+        ((pl.col("ma_fast") < pl.col("ma_slow")) &
+         (pl.col("ma_fast").shift(1) >= pl.col("ma_slow").shift(1))).alias("cross_down"),
+        ((pl.col("macd") > pl.col("macd_signal")) &
+         (pl.col("macd").shift(1) <= pl.col("macd_signal").shift(1))).alias("macd_cross_up"),
+        ((pl.col("macd") < pl.col("macd_signal")) &
+         (pl.col("macd").shift(1) >= pl.col("macd_signal").shift(1))).alias("macd_cross_down")
+    ])
+
+    # 5. Initialize signals
+    df = df.with_columns([
+        pl.lit(0).alias("raw_signal"),
+        pl.lit("").alias("signal_type")
+    ])
+
+    # 6. Apply signals in priority order (MA > RSI Reversal > MACD)
     ma_buy = (
-        df['cross_up'] &
-        (df['rsi'] < 70) &  # Not overbought
-        (df['volume_ratio'] >= config['min_volume_ratio'])
+        pl.col("cross_up") &
+        (pl.col("rsi") < 70) &
+        (pl.col("volume_ratio") >= config["min_volume_ratio"])
     )
-    
     ma_sell = (
-        df['cross_down'] &
-        (df['rsi'] > 30) &  # Not oversold
-        (df['volume_ratio'] >= config['min_volume_ratio'])
+        pl.col("cross_down") &
+        (pl.col("rsi") > 30) &
+        (pl.col("volume_ratio") >= config["min_volume_ratio"])
     )
-    
-    df.loc[ma_buy, 'raw_signal'] = 1
-    df.loc[ma_buy, 'signal_type'] = 'MA_CROSS'
-    
-    df.loc[ma_sell, 'raw_signal'] = -1
-    df.loc[ma_sell, 'signal_type'] = 'MA_CROSS'
-    
-    # 2. RSI Extreme Reversal (Secondary)
+
+    df = df.with_columns([
+        pl.when(ma_buy).then(1)
+          .when(ma_sell).then(-1)
+          .otherwise(pl.col("raw_signal"))
+          .alias("raw_signal"),
+        pl.when(ma_buy | ma_sell).then(pl.lit("MA_CROSS"))
+          .otherwise(pl.col("signal_type"))
+          .alias("signal_type")
+    ])
+
     rsi_reversal_buy = (
-        (df['rsi'] < config['rsi_oversold']) &
-        (df['rsi'].shift(1) < df['rsi']) &  # RSI turning up
-        (df['macd_hist'] > df['macd_hist'].shift(1)) &  # MACD momentum positive
-        (df['raw_signal'] == 0)  # Don't override MA signals
+        (pl.col("rsi") < config["rsi_oversold"]) &
+        (pl.col("rsi").shift(1) < pl.col("rsi")) &
+        (pl.col("macd_hist") > pl.col("macd_hist").shift(1)) &
+        (pl.col("raw_signal") == 0)
     )
-    
     rsi_reversal_sell = (
-        (df['rsi'] > config['rsi_overbought']) &
-        (df['rsi'].shift(1) > df['rsi']) &  # RSI turning down
-        (df['macd_hist'] < df['macd_hist'].shift(1)) &  # MACD momentum negative
-        (df['raw_signal'] == 0)
+        (pl.col("rsi") > config["rsi_overbought"]) &
+        (pl.col("rsi").shift(1) > pl.col("rsi")) &
+        (pl.col("macd_hist") < pl.col("macd_hist").shift(1)) &
+        (pl.col("raw_signal") == 0)
     )
-    
-    df.loc[rsi_reversal_buy, 'raw_signal'] = 1
-    df.loc[rsi_reversal_buy, 'signal_type'] = 'RSI_REVERSAL'
-    
-    df.loc[rsi_reversal_sell, 'raw_signal'] = -1
-    df.loc[rsi_reversal_sell, 'signal_type'] = 'RSI_REVERSAL'
-    
-    # 3. MACD Momentum Strategy (Tertiary)
+
+    df = df.with_columns([
+        pl.when(rsi_reversal_buy).then(1)
+          .when(rsi_reversal_sell).then(-1)
+          .otherwise(pl.col("raw_signal"))
+          .alias("raw_signal"),
+        pl.when(rsi_reversal_buy | rsi_reversal_sell).then(pl.lit("RSI_REVERSAL"))
+          .otherwise(pl.col("signal_type"))
+          .alias("signal_type")
+    ])
+
     macd_buy = (
-        df['macd_cross_up'] &
-        (df['uptrend']) &
-        (df['rsi'] < 65) &
-        (df['raw_signal'] == 0)
+        pl.col("macd_cross_up") &
+        pl.col("uptrend") &
+        (pl.col("rsi") < 65) &
+        (pl.col("raw_signal") == 0)
     )
-    
     macd_sell = (
-        df['macd_cross_down'] &
-        (df['downtrend']) &
-        (df['rsi'] > 35) &
-        (df['raw_signal'] == 0)
+        pl.col("macd_cross_down") &
+        pl.col("downtrend") &
+        (pl.col("rsi") > 35) &
+        (pl.col("raw_signal") == 0)
     )
-    
-    df.loc[macd_buy, 'raw_signal'] = 1
-    df.loc[macd_buy, 'signal_type'] = 'MACD'
-    
-    df.loc[macd_sell, 'raw_signal'] = -1
-    df.loc[macd_sell, 'signal_type'] = 'MACD'
-    
-    # ===== SIGNAL QUALITY SCORING =====
-    
-    df['signal_quality'] = 0.0
-    
-    # Base score for having any signal
-    df.loc[df['raw_signal'] != 0, 'signal_quality'] += 30
-    
-    # Trend alignment bonus
-    df.loc[(df['raw_signal'] == 1) & df['uptrend'], 'signal_quality'] += 20
-    df.loc[(df['raw_signal'] == -1) & df['downtrend'], 'signal_quality'] += 20
-    
-    # RSI in good zone (not extreme)
-    df.loc[df['rsi'].between(45, 55), 'signal_quality'] += 15
-    
-    # Strong momentum
-    df.loc[np.abs(df['momentum_5']) > 0.02, 'signal_quality'] += 15
-    
-    # MACD confirmation
-    df.loc[(df['raw_signal'] == 1) & (df['macd_hist'] > 0), 'signal_quality'] += 10
-    df.loc[(df['raw_signal'] == -1) & (df['macd_hist'] < 0), 'signal_quality'] += 10
-    
-    # Volume confirmation
-    df.loc[(df['raw_signal'] != 0) & (df['volume_ratio'] > 1.2), 'signal_quality'] += 10
-    
-    # ===== FINAL SIGNAL =====
-    
-    df['signal'] = 0
-    
-    # Apply quality filter
-    high_quality = df['signal_quality'] >= config['min_signal_quality']
-    df.loc[(df['raw_signal'] == 1) & high_quality, 'signal'] = 1
-    df.loc[(df['raw_signal'] == -1) & high_quality, 'signal'] = -1
-    
-    # ===== RISK MANAGEMENT LEVELS =====
-    
-    df['stop_loss'] = np.nan
-    df['take_profit'] = np.nan
-    df['trailing_stop'] = np.nan
-    
-    # For long positions
-    long_mask = df['signal'] == 1
-    df.loc[long_mask, 'stop_loss'] = df['close'] - config['atr_multiplier_sl'] * df['atr']
-    df.loc[long_mask, 'take_profit'] = df['close'] + config['atr_multiplier_tp'] * df['atr']
-    df.loc[long_mask, 'trailing_stop'] = df['close'] - config['atr_multiplier_trailing'] * df['atr']
-    
-    # For short positions
-    short_mask = df['signal'] == -1
-    df.loc[short_mask, 'stop_loss'] = df['close'] + config['atr_multiplier_sl'] * df['atr']
-    df.loc[short_mask, 'take_profit'] = df['close'] - config['atr_multiplier_tp'] * df['atr']
-    df.loc[short_mask, 'trailing_stop'] = df['close'] + config['atr_multiplier_trailing'] * df['atr']
-    
-    # Position sizing based on volatility
-    risk_per_trade = 0.015  # 1.5% risk
-    df['position_size_pct'] = (risk_per_trade * df['close']) / (config['atr_multiplier_sl'] * df['atr'])
-    df['position_size_pct'] = df['position_size_pct'].clip(0.03, 0.15)  # 3-15%
-    
+
+    df = df.with_columns([
+        pl.when(macd_buy).then(1)
+          .when(macd_sell).then(-1)
+          .otherwise(pl.col("raw_signal"))
+          .alias("raw_signal"),
+        pl.when(macd_buy | macd_sell).then(pl.lit("MACD"))
+          .otherwise(pl.col("signal_type"))
+          .alias("signal_type")
+    ])
+
+    # 7. Signal Quality Scoring – single chained expression (no duplicate error)
+    df = df.with_columns(
+        pl.lit(0.0)
+        .add(pl.when(pl.col("raw_signal") != 0).then(30).otherwise(0))
+        .add(pl.when((pl.col("raw_signal") == 1) & pl.col("uptrend")).then(20)
+             .when((pl.col("raw_signal") == -1) & pl.col("downtrend")).then(20)
+             .otherwise(0))
+        .add(pl.when(pl.col("rsi").is_between(45, 55)).then(15).otherwise(0))
+        .add(pl.when(pl.col("momentum_5").abs() > 0.02).then(15).otherwise(0))
+        .add(pl.when((pl.col("raw_signal") == 1) & (pl.col("macd_hist") > 0)).then(10)
+             .when((pl.col("raw_signal") == -1) & (pl.col("macd_hist") < 0)).then(10)
+             .otherwise(0))
+        .add(pl.when((pl.col("raw_signal") != 0) & (pl.col("volume_ratio") > 1.2)).then(10)
+             .otherwise(0))
+        .alias("signal_quality")
+    )
+
+    # 8. Final Signal – single expression (no duplicate column error)
+    df = df.with_columns(pl.lit(0).alias("signal"))
+
+    high_quality = pl.col("signal_quality") >= config["min_signal_quality"]
+
+    df = df.with_columns(
+        pl.when(pl.col("raw_signal") == 1)
+          .then(pl.when(high_quality).then(1).otherwise(0))
+          .when(pl.col("raw_signal") == -1)
+          .then(pl.when(high_quality).then(-1).otherwise(0))
+          .otherwise(pl.col("signal"))
+          .alias("signal")
+    )
+
+    # 9. Risk Management Levels
+    df = df.with_columns([
+        pl.lit(None).alias("stop_loss"),
+        pl.lit(None).alias("take_profit"),
+        pl.lit(None).alias("trailing_stop")
+    ])
+
+    long_mask = pl.col("signal") == 1
+    df = df.with_columns([
+        pl.when(long_mask)
+          .then(pl.col("close") - config["atr_multiplier_sl"] * pl.col("atr"))
+          .otherwise(pl.col("stop_loss"))
+          .alias("stop_loss"),
+        pl.when(long_mask)
+          .then(pl.col("close") + config["atr_multiplier_tp"] * pl.col("atr"))
+          .otherwise(pl.col("take_profit"))
+          .alias("take_profit"),
+        pl.when(long_mask)
+          .then(pl.col("close") - config["atr_multiplier_trailing"] * pl.col("atr"))
+          .otherwise(pl.col("trailing_stop"))
+          .alias("trailing_stop")
+    ])
+
+    short_mask = pl.col("signal") == -1
+    df = df.with_columns([
+        pl.when(short_mask)
+          .then(pl.col("close") + config["atr_multiplier_sl"] * pl.col("atr"))
+          .otherwise(pl.col("stop_loss"))
+          .alias("stop_loss"),
+        pl.when(short_mask)
+          .then(pl.col("close") - config["atr_multiplier_tp"] * pl.col("atr"))
+          .otherwise(pl.col("take_profit"))
+          .alias("take_profit"),
+        pl.when(short_mask)
+          .then(pl.col("close") + config["atr_multiplier_trailing"] * pl.col("atr"))
+          .otherwise(pl.col("trailing_stop"))
+          .alias("trailing_stop")
+    ])
+
+    risk_per_trade = 0.015
+    df = df.with_columns(
+        ((risk_per_trade * pl.col("close")) / (config["atr_multiplier_sl"] * pl.col("atr")))
+        .clip(0.03, 0.15)
+        .alias("position_size_pct")
+    )
+
     return df
 
+
 def load_strategy_config():
-    """Load config from risk_config.json"""
     config_path = Path("data") / "risk_config.json"
     default_config = {
         "fast_ma": 8,
@@ -254,17 +293,6 @@ def load_strategy_config():
     
     return default_config
 
+
 if __name__ == "__main__":
     print("Balanced Trading Strategy - Loaded")
-    print("\nKey Features:")
-    print("  - Multiple signal types: MA Cross, RSI Reversal, MACD")
-    print("  - Relaxed filters for more signals")
-    print("  - Quality scoring: 40+ threshold")
-    print("  - Fast MA periods (8/21) for responsiveness")
-    print("  - Volume filter disabled by default")
-    print("  - ATR-based dynamic risk management")
-    print("\nExpected Behavior:")
-    print("  - More frequent signals than strict strategy")
-    print("  - Better for stress testing real market conditions")
-    print("  - Quality filter prevents garbage trades")
-    print("  - Good balance of signal frequency and quality")

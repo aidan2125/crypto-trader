@@ -1,39 +1,34 @@
 #!/usr/bin/env python3
 """
 Standalone Backtester for Crypto Trader Project
-- Fully self-contained (no import/package issues)
-- Uses your existing enhanced_strategy and fetch_ohlcv
-- Integrates with your risk_config.json presets
-- Professional output with trades, PnL, ROI, drawdown
-- Now saves results to Supabase after backtest
-
-Run with:
-    python run_backtest_simple.py
-
-Compatible with your run_with_risk_preset.py workflow:
-1. Run preset applier → updates data/risk_config.json
-2. Run this backtest → uses the same risk settings + saves to DB
+- Uses Polars throughout
+- Complete BacktestPro class with all methods
+- Saves results to Supabase
 """
 
-import pandas as pd
 import json
 from pathlib import Path
-from datetime import datetime
-from data.market_data import fetch_ohlcv
-from strategies.enhanced_signals import enhanced_strategy  # Your strategy function
-from database.supabase_db import insert_backtest_result  # Supabase save function
+from datetime import datetime, timezone
 
-# Load risk config to sync with your live bot presets
+import polars as pl
+
+from data.market_data import fetch_ohlcv
+from strategies.enhanced_signals import enhanced_strategy
+from database.supabase_db import insert_backtest_result        # Supabase save function
+
+# ────────────────────────────────────────────────
+# Load risk config
+# ────────────────────────────────────────────────
 RISK_CONFIG_PATH = Path("data") / "risk_config.json"
 
 def load_risk_config():
-    """Load your risk preset from data/risk_config.json (applied by run_with_risk_preset.py)"""
+    """Load your risk preset from data/risk_config.json"""
     default_config = {
-        "risk_per_trade": 0.01,          # 1% risk per trade
-        "atr_multiplier_sl": 2.0,         # Stop Loss = 2 x ATR
-        "atr_multiplier_tp": 3.0,         # Take Profit = 3 x ATR (1:1.5 RR)
-        "min_signal_quality": 60,        # Only trade high-quality signals
-        "position_size_pct": 0.10        # Fallback fixed size if ATR missing
+        "risk_per_trade": 0.01,
+        "atr_multiplier_sl": 2.0,
+        "atr_multiplier_tp": 3.0,
+        "min_signal_quality": 60,
+        "position_size_pct": 0.10
     }
     if RISK_CONFIG_PATH.exists():
         try:
@@ -50,6 +45,10 @@ def load_risk_config():
         print("No risk_config.json found — using default settings.\n")
     return default_config
 
+
+# ────────────────────────────────────────────────
+# Backtest engine
+# ────────────────────────────────────────────────
 class BacktestPro:
     def __init__(self, initial_balance=10000, risk_config=None):
         self.initial_balance = float(initial_balance)
@@ -59,28 +58,20 @@ class BacktestPro:
         self.position = None
         self.risk_config = risk_config or {}
 
-    def run(self, df: pd.DataFrame, symbol: str = "BTC/USDT", strategy_name: str = "Enhanced Strategy"):
-        if df.empty:
+    def run(self, df: pl.DataFrame, symbol: str = "BTC/USDT", strategy_name: str = "Enhanced Strategy"):
+        if df.is_empty():
             print("No data to backtest.")
-            return
-
-        # Clean data: only require close and signal
-        df = df.copy()
-        df = df.dropna(subset=['close', 'signal']).reset_index(drop=True)
-
-        if len(df) < 50:
-            print("Not enough valid data after cleaning.")
             return
 
         print(f"=== BACKTEST START ===")
         print(f"Symbol           : {symbol}")
-        print(f"Valid candles    : {len(df)}")
+        print(f"Valid candles    : {df.height}")
         print(f"Strategy         : {strategy_name}")
         print(f"Initial Balance  : ${self.initial_balance:,.0f}\n")
 
         # Signal stats
-        buys = (df['signal'] == 1).sum()
-        sells = (df['signal'] == -1).sum()
+        buys = df.filter(pl.col("signal") == 1).height
+        sells = df.filter(pl.col("signal") == -1).height
         print(f"Total BUY signals  : {buys}")
         print(f"Total SELL signals : {sells}\n")
 
@@ -88,49 +79,67 @@ class BacktestPro:
         tp_mult = self.risk_config.get('atr_multiplier_tp', 3.0)
         risk_pct = self.risk_config.get('risk_per_trade', 0.01)
 
-        for i in range(1, len(df)):
-            row = df.iloc[i]
-            price = float(row['close'])
+        # Cache column indices
+        columns = df.columns
+        close_idx  = columns.index("close") if "close" in columns else -1
+        signal_idx = columns.index("signal") if "signal" in columns else -1
+        atr_idx    = columns.index("atr") if "atr" in columns else -1
+
+        if close_idx == -1 or signal_idx == -1:
+            print("Missing required columns: close or signal")
+            return
+
+        print(f"Using column indices → close:{close_idx}, signal:{signal_idx}, atr:{atr_idx}\n")
+
+        for i in range(1, df.height):
+            row = df.row(i)
+            price = float(row[close_idx])
 
             # Exit first
             if self.position:
-                self._check_exit(row, price, sl_mult, tp_mult)
+                self._check_exit(row, price, sl_mult, tp_mult, signal_idx)
 
             # Entry
-            signal = int(row['signal'])
+            signal = int(row[signal_idx])
             if signal != 0 and self.position is None and self.balance > 100:
-                self._open_position(signal, row, price, risk_pct, sl_mult, tp_mult)
+                self._open_position(signal, row, price, risk_pct, sl_mult, tp_mult, atr_idx)
 
             # Equity tracking
             current_value = self.balance + (self.position['value'] if self.position else 0)
             self.equity.append(current_value)
 
-        # Close final position
+        # Close final position if open
         if self.position:
-            final_price = float(df['close'].iloc[-1])
+            final_price = float(df["close"].tail(1)[0])
             self._close_position(final_price, "END_OF_DATA", sl_mult, tp_mult)
 
         self.print_summary(symbol, strategy_name)
 
-    def _open_position(self, signal: int, row: pd.Series, price: float, risk_pct: float, sl_mult: float, tp_mult: float):
+    def _open_position(self, signal: int, row: tuple, price: float, risk_pct: float, sl_mult: float, tp_mult: float, atr_idx: int):
         entry_price = price * (1.0005 if signal == 1 else 0.9995)  # 0.05% slippage
 
-        # Stop distance
-        if 'atr' in row and pd.notna(row['atr']) and row['atr'] > 0:
-            sl_distance = sl_mult * row['atr']
+        atr = None
+        if atr_idx >= 0:
+            atr_value = row[atr_idx]
+            if atr_value is not None:
+                try:
+                    atr = float(atr_value)
+                except (ValueError, TypeError):
+                    atr = None
+
+        if atr is not None and atr > 0:
+            sl_distance = sl_mult * atr
         else:
             sl_distance = entry_price * 0.02  # fallback
 
-        # Position sizing: risk fixed % of balance
         risk_amount = self.balance * risk_pct
-        size_usd = risk_amount / (sl_distance / entry_price)
+        size_usd = risk_amount / (sl_distance / entry_price) if sl_distance > 0 else 0
         size_usd = min(size_usd, self.balance * 0.95)
 
         if size_usd < 50:
             return
 
-        # Fee on entry
-        size_usd *= 0.999  # 0.1% fee
+        size_usd *= 0.999  # entry fee
 
         sl_price = entry_price - sl_distance if signal == 1 else entry_price + sl_distance
         tp_price = entry_price + (sl_distance * (tp_mult / sl_mult)) if signal == 1 else entry_price - (sl_distance * (tp_mult / sl_mult))
@@ -148,13 +157,19 @@ class BacktestPro:
         side_str = "LONG " if signal == 1 else "SHORT"
         print(f"{side_str} @ {entry_price:.2f} | Size: ${size_usd:,.0f} | SL: {sl_price:.2f} | TP: {tp_price:.2f}")
 
-    def _check_exit(self, row: pd.Series, price: float, sl_mult: float, tp_mult: float):
+    def _check_exit(self, row: tuple, price: float, sl_mult: float, tp_mult: float, signal_idx: int):
         pos = self.position
         exit_price = price * (0.9995 if pos['side'] == 'long' else 1.0005)
 
         hit_sl = (pos['side'] == 'long' and price <= pos['sl']) or (pos['side'] == 'short' and price >= pos['sl'])
         hit_tp = (pos['side'] == 'long' and price >= pos['tp']) or (pos['side'] == 'short' and price <= pos['tp'])
-        opposite = (pos['side'] == 'long' and row['signal'] == -1) or (pos['side'] == 'short' and row['signal'] == 1)
+
+        opposite = False
+        if signal_idx >= 0:
+            current_signal = row[signal_idx]
+            if current_signal is not None:
+                opposite = (pos['side'] == 'long' and int(current_signal) == -1) or \
+                           (pos['side'] == 'short' and int(current_signal) == 1)
 
         if hit_sl or hit_tp or opposite:
             reason = "SL" if hit_sl else ("TP" if hit_tp else "SIGNAL")
@@ -169,7 +184,7 @@ class BacktestPro:
         pnl = pnl_raw * 0.999  # exit fee
 
         self.balance += pos['size_usd'] + pnl
-        pnl_pct = pnl / pos['size_usd'] * 100
+        pnl_pct = pnl / pos['size_usd'] * 100 if pos['size_usd'] != 0 else 0
 
         self.trades.append({'pnl': pnl, 'pnl_pct': pnl_pct, 'reason': reason})
 
@@ -183,92 +198,87 @@ class BacktestPro:
             print("\nNo trades executed — check signal generation or filters.")
             return
 
-        df_trades = pd.DataFrame(self.trades)
-        total_pnl = df_trades['pnl'].sum()
-        roi = (self.balance / self.initial_balance - 1) * 100
-        win_rate = (df_trades['pnl'] > 0).mean()
-        gross_profit = df_trades[df_trades['pnl'] > 0]['pnl'].sum()
-        gross_loss = abs(df_trades[df_trades['pnl'] <= 0]['pnl'].sum())
+        df_trades = pl.DataFrame(self.trades)
+        total_pnl = df_trades["pnl"].sum()
+        roi = (self.balance / self.initial_balance - 1) * 100 if self.initial_balance != 0 else 0
+        win_rate = df_trades.filter(pl.col("pnl") > 0).height / df_trades.height if df_trades.height > 0 else 0.0
+        gross_profit = df_trades.filter(pl.col("pnl") > 0)["pnl"].sum()
+        gross_loss = abs(df_trades.filter(pl.col("pnl") <= 0)["pnl"].sum())
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
 
-        equity_curve = pd.Series([self.initial_balance] + self.equity)
-        max_dd = (equity_curve / equity_curve.cummax() - 1).min()
+        equity_curve = pl.Series([self.initial_balance] + self.equity)
+        max_dd = (equity_curve / equity_curve.cum_max() - 1).min() if equity_curve.len() > 1 else 0.0
 
         print("\n" + "═" * 70)
         print(f" BACKTEST SUMMARY - {symbol.upper()}")
         print("═" * 70)
         print(f"Strategy         : {strategy_name}")
-        print(f"Total Trades     : {len(df_trades)}")
+        print(f"Total Trades     : {df_trades.height}")
         print(f"Win Rate         : {win_rate:.1%}")
         print(f"Profit Factor    : {profit_factor:.2f}")
         print(f"Total PnL        : ${total_pnl:+,.0f}")
         print(f"Final Balance    : ${self.balance:,.0f}")
         print(f"ROI              : {roi:+.1f}%")
         print(f"Max Drawdown     : {max_dd:.1%}")
-        print(f"Avg PnL/Trade    : ${df_trades['pnl'].mean():+.0f}")
+        print(f"Avg PnL/Trade    : ${df_trades['pnl'].mean():+.0f}" if df_trades.height > 0 else "Avg PnL/Trade    : $0")
         print("═" * 70)
 
-# === MAIN EXECUTION ===
+
+# ────────────────────────────────────────────────
+# MAIN EXECUTION
+# ────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Load your active risk preset
     risk_config = load_risk_config()
 
-    # Configuration
     symbol = "BTC/USDT"
     timeframe = "1h"
-    limit = 5000  # Adjust based on your exchange API limit
+    limit = 5000
 
     print("Fetching market data...")
     df = fetch_ohlcv(symbol, timeframe, limit)
 
-    if df is None or df.empty:
+    if df is None or df.is_empty():
         print("Failed to fetch data.")
     else:
-        print(f"Raw data: {len(df)} candles\n")
+        print(f"Raw data: {df.height} candles\n")
         df = enhanced_strategy(df)
         print("Strategy applied.\n")
 
         backtester = BacktestPro(initial_balance=10000, risk_config=risk_config)
         backtester.run(df, symbol=symbol, strategy_name="Enhanced Strategy")
 
-        # ────────────────────────────────────────────────
-        # SAVE BACKTEST RESULT TO SUPABASE
-        # ────────────────────────────────────────────────
+        # Save to Supabase
         print("\nSaving backtest result to Supabase...")
-
         try:
-            df_trades = pd.DataFrame(backtester.trades) if backtester.trades else pd.DataFrame()
-            total_pnl = df_trades['pnl'].sum() if not df_trades.empty else 0
+            df_trades = pl.DataFrame(backtester.trades) if backtester.trades else pl.DataFrame()
+            total_pnl = df_trades["pnl"].sum() if df_trades.height > 0 else 0
             roi = (backtester.balance / backtester.initial_balance - 1) if backtester.initial_balance != 0 else 0
-            win_rate = (df_trades['pnl'] > 0).mean() if not df_trades.empty else 0.0
-            gross_profit = df_trades[df_trades['pnl'] > 0]['pnl'].sum() if not df_trades.empty else 0
-            gross_loss = abs(df_trades[df_trades['pnl'] <= 0]['pnl'].sum()) if not df_trades.empty else 0
+            win_rate = df_trades.filter(pl.col("pnl") > 0).height / df_trades.height if df_trades.height > 0 else 0.0
+            gross_profit = df_trades.filter(pl.col("pnl") > 0)["pnl"].sum() if df_trades.height > 0 else 0
+            gross_loss = abs(df_trades.filter(pl.col("pnl") <= 0)["pnl"].sum()) if df_trades.height > 0 else 0
             profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
-            equity_curve = pd.Series([backtester.initial_balance] + backtester.equity)
-            max_dd = (equity_curve / equity_curve.cummax() - 1).min() if len(equity_curve) > 1 else 0.0
+            equity_curve = pl.Series([backtester.initial_balance] + backtester.equity)
+            max_dd = (equity_curve / equity_curve.cum_max() - 1).min() if equity_curve.len() > 1 else 0.0
 
             result = {
-                "preset_id": int(2),
-                "coin_id": int(1),
-                "run_time": datetime.now().isoformat(),
-                "timeframe": str(timeframe),
-                "num_candles": int(len(df)),
-                "num_trades": int(len(backtester.trades)),
-                "win_rate": float(win_rate),
-                "profit_factor": float(profit_factor),
-                "roi": float(roi),
-                "max_drawdown": float(max_dd),
-                "avg_pnl": float(df_trades['pnl'].mean() if not df_trades.empty else 0),
-            
+                "preset_id": 2,
+                "coin_id": 1,
+                "run_time": datetime.now(timezone.utc).isoformat(),
+                "timeframe": timeframe,
+                "num_candles": df.height,
+                "num_trades": len(backtester.trades),
+                "win_rate": win_rate,
+                "profit_factor": profit_factor,
+                "roi": roi,
+                "max_drawdown": max_dd,
+                "avg_pnl": df_trades["pnl"].mean() if df_trades.height > 0 else 0.0,
+                "passed": int(roi > 0)
             }
 
             success = insert_backtest_result(result)
             print("Saved successfully:", success)
 
-        except ImportError as e:
-            print(f"✗ Could not import insert_backtest_result: {e}")
-            print("   Make sure database/supabase_db.py exists and has the function")
         except Exception as e:
-            print(f"✗ Failed to save to Supabase: {e}")
+            print(f"Failed to save to Supabase: {e}")
             import traceback
             traceback.print_exc()

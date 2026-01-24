@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Enhanced Crypto Trading Bot
 Dynamic ATR-based Risk Management + Multi-Channel Alerts
@@ -8,8 +9,9 @@ import os
 import time
 import json
 import argparse
-from datetime import datetime
-import pandas as pd
+from datetime import datetime, timezone
+
+import polars as pl
 
 from data.multi_coin_list import COIN_CURRENCY
 from data.market_data import fetch_ohlcv
@@ -21,7 +23,7 @@ from alerts.discord_alerts import send_discord_message
 from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
 
-# Import BacktestPro from run_backtest_simple (supports risk_config dict)
+# Import BacktestPro — make sure this is at top level in run_backtest_simple.py
 from run_backtest_simple import BacktestPro
 
 # Supabase integration
@@ -81,7 +83,7 @@ def run_for_coin(coin: str):
     try:
         currency = COIN_CURRENCY.get(coin, DEFAULT_CURRENCY)
         df = fetch_ohlcv(symbol=coin)
-        if df is None or df.empty:
+        if df is None or df.is_empty():
             logging.warning(f"{coin}: No data")
             return
 
@@ -95,16 +97,18 @@ def run_for_coin(coin: str):
         except Exception as e:
             logging.error(f"{coin}: Plot error: {e}")
 
-        current_signal = int(df["signal"].iloc[-1])
-        price = float(df["close"].iloc[-1])
+        # Safe tail access with Polars
+        last_row = df.tail(1)
+        current_signal = int(last_row["signal"][0]) if "signal" in last_row.columns else 0
+        price = float(last_row["close"][0]) if "close" in last_row.columns else 0.0
         
         atr = None
-        if "atr" in df.columns and not df["atr"].isna().iloc[-1]:
-            atr = float(df["atr"].iloc[-1])
+        if "atr" in last_row.columns and last_row["atr"][0] is not None:
+            atr = float(last_row["atr"][0])
         
         signal_quality = None
-        if "signal_quality" in df.columns and not df["signal_quality"].isna().iloc[-1]:
-            signal_quality = float(df["signal_quality"].iloc[-1])
+        if "signal_quality" in last_row.columns and last_row["signal_quality"][0] is not None:
+            signal_quality = float(last_row["signal_quality"][0])
 
         if current_signal not in [-1, 0, 1]:
             logging.warning(f"{coin}: Invalid signal {current_signal}")
@@ -149,7 +153,7 @@ def run_for_coin(coin: str):
             save_last_signals(last_signals)
 
             log_msg = f"{coin}: {previous_signal} → {current_signal}"
-            if signal_quality:
+            if signal_quality is not None:
                 log_msg += f" | Quality: {signal_quality:.0f}"
             log_msg += f" | Alerts: {alerts_sent}"
             
@@ -175,10 +179,10 @@ def check_all_positions_for_exits():
         for coin, position in list(positions.items()):
             try:
                 df = fetch_ohlcv(symbol=coin, limit=1)
-                if df is None or df.empty:
+                if df is None or df.is_empty():
                     continue
                 
-                current_price = float(df["close"].iloc[-1])
+                current_price = float(df["close"][0])
                 sl = position.get("stop_loss")
                 tp = position.get("take_profit")
                 currency = position.get("currency", DEFAULT_CURRENCY)
@@ -214,7 +218,6 @@ def run_startup_backtest_check():
                 if supabase_preset:
                     risk_config = supabase_preset
                     print("✓ Loaded 'moderate' preset from Supabase")
-                    print("Using Supabase preset for backtest")
             except Exception as e:
                 print(f"Supabase preset failed: {e}")
 
@@ -233,7 +236,7 @@ def run_startup_backtest_check():
         print(f"Fetching {symbol} {timeframe} data for backtest...")
         df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
 
-        if df is None or df.empty:
+        if df is None or df.is_empty():
             print("→ No data for backtest")
             return None
 
@@ -248,30 +251,30 @@ def run_startup_backtest_check():
             print("\nSaving startup backtest result to Supabase...")
 
             try:
-                df_trades = pd.DataFrame(backtester.trades) if backtester.trades else pd.DataFrame()
-                total_pnl = float(df_trades['pnl'].sum()) if not df_trades.empty else 0.0
-                roi = float((backtester.balance / backtester.initial_balance - 1)) if backtester.initial_balance != 0 else 0.0
-                win_rate = float((df_trades['pnl'] > 0).mean()) if not df_trades.empty else 0.0
-                gross_profit = float(df_trades[df_trades['pnl'] > 0]['pnl'].sum()) if not df_trades.empty else 0.0
-                gross_loss = float(abs(df_trades[df_trades['pnl'] <= 0]['pnl'].sum())) if not df_trades.empty else 0.0
-                profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else 0.0
-                equity_curve = pd.Series([backtester.initial_balance] + backtester.equity)
-                max_dd = float((equity_curve / equity_curve.cummax() - 1).min()) if len(equity_curve) > 1 else 0.0
-                avg_pnl = float(df_trades['pnl'].mean()) if not df_trades.empty else 0.0
+                df_trades = pl.DataFrame(backtester.trades) if backtester.trades else pl.DataFrame()
+                total_pnl = df_trades["pnl"].sum() if df_trades.height > 0 else 0
+                roi = (backtester.balance / backtester.initial_balance - 1) if backtester.initial_balance != 0 else 0
+                win_rate = df_trades.filter(pl.col("pnl") > 0).height / df_trades.height if df_trades.height > 0 else 0.0
+                gross_profit = df_trades.filter(pl.col("pnl") > 0)["pnl"].sum() if df_trades.height > 0 else 0
+                gross_loss = abs(df_trades.filter(pl.col("pnl") <= 0)["pnl"].sum()) if df_trades.height > 0 else 0
+                profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+                equity_curve = pl.Series([backtester.initial_balance] + backtester.equity)
+                max_dd = (equity_curve / equity_curve.cum_max() - 1).min() if equity_curve.len() > 1 else 0.0
+                avg_pnl = df_trades["pnl"].mean() if df_trades.height > 0 else 0.0
 
                 result = {
                     "preset_id": int(2),
                     "coin_id": int(1),
-                    "run_time": datetime.now().isoformat(),
+                    "run_time": datetime.now(timezone.utc).isoformat(),
                     "timeframe": str(timeframe),
-                    "num_candles": int(len(df)),
+                    "num_candles": int(df.height),
                     "num_trades": int(len(backtester.trades)),
                     "win_rate": win_rate,
                     "profit_factor": profit_factor,
                     "roi": roi,
                     "max_drawdown": max_dd,
                     "avg_pnl": avg_pnl,
-                    "passed": bool(roi > 0)
+                    "passed": int(roi > 0)
                 }
 
                 success = insert_backtest_result(result)
@@ -307,8 +310,8 @@ def main(continuous: bool = False, interval: int = 300):
     if supabase_config:
         config = supabase_config
         print("\nRisk Config from Supabase:")
-        print(f"  Max Positions: {config['max_positions']}")
-        print(f"  Risk/Trade: {config['risk_per_trade']*100:.1f}%")
+        print(f"  Max Positions: {config.get('max_positions', 5)}")
+        print(f"  Risk/Trade: {config.get('risk_per_trade', 0.02)*100:.1f}%")
     else:
         config = load_config()
 
