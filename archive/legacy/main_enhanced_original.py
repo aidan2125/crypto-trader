@@ -17,7 +17,6 @@ from typing import Optional, Dict, Any
 import polars as pl
 
 from data.multi_coin_list import COIN_CURRENCY
-from bot.signal_guard import get_tradeable_coins
 from data.market_data import fetch_ohlcv
 from strategies.enhanced_signals_refactored import enhanced_strategy
 from reports.plot_signals import plot_signals
@@ -33,11 +32,11 @@ from execution.enhanced_paper_trader import (
 )
 
 # Import BacktestPro
-from backtest.run_backtest_simple import BacktestPro
+from run_backtest_simple import BacktestPro
 
 # Supabase integration
 try:
-    raise ImportError("Supabase disabled")
+    from database.supabase_db import get_active_preset, insert_backtest_result
 except ImportError:
     get_active_preset = None
     insert_backtest_result = None
@@ -423,7 +422,7 @@ def run_startup_backtest_check() -> Optional[Dict[str, Any]]:
         risk_config = None
         
         # Try to load from Supabase first
-        if False:  # Supabase disabled — using strict mode
+        if get_active_preset:
             try:
                 supabase_preset = get_active_preset("moderate")
                 if supabase_preset:
@@ -445,7 +444,7 @@ def run_startup_backtest_check() -> Optional[Dict[str, Any]]:
         # Backtest parameters
         symbol = "BTC/USDT"
         timeframe = "1h"
-        limit = 500
+        limit = 3000
         
         print(f"Fetching {symbol} {timeframe} data (last {limit} candles)...")
         df = fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
@@ -494,7 +493,7 @@ def run_startup_backtest_check() -> Optional[Dict[str, Any]]:
         print(f"{'-' * 80}\n")
         
         # Save to Supabase if available
-        if False:  # Supabase disabled
+        if insert_backtest_result:
             print("Saving backtest result to Supabase...")
             
             try:
@@ -550,15 +549,21 @@ def main(continuous: bool = False, interval: int = 300) -> None:
     # Run startup backtest
     backtest_results = run_startup_backtest_check()
     
-    if backtest_results and backtest_results.get("roi", 0) < -0.10:
+    if backtest_results and backtest_results.get("roi", 0) < 0:
         logging.warning("Startup backtest showed negative ROI - strategy may need adjustment")
         print("WARNING: Startup backtest showed negative ROI")
     
     run_count = 0
     
     # Load risk configuration
+    supabase_config = None
+    if get_active_preset:
+        try:
+            supabase_config = get_active_preset("moderate")
+        except Exception as e:
+            logging.warning(f"Failed to load Supabase config: {e}")
     
-    config = load_config()
+    config = supabase_config if supabase_config else load_config()
     
     if not config:
         logging.warning("No risk config loaded - using defaults")
@@ -591,13 +596,7 @@ def main(continuous: bool = False, interval: int = 300) -> None:
         coins_processed = 0
         coins_failed = 0
         
-        tradeable = get_tradeable_coins(
-            all_coins=list(COIN_CURRENCY.keys()),
-            min_quality=60,
-            top_n=4,
-            require_market_ok=True,
-        )
-        for coin in tradeable:
+        for coin in COIN_CURRENCY:
             print(f"Processing {coin}...")
             try:
                 run_for_coin(coin)

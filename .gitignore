@@ -1,7 +1,51 @@
-venv/
-__pycache__/
+# ── Secrets (NEVER commit these) ─────────────────────────────────────────────
 .env
-logs/
-.env
-.env
+.env.live
+.env.paper
+secrets/
+*.pem
+*.key
+
+# ── Virtual environment ───────────────────────────────────────────────────────
 .venv/
+venv/
+env/
+
+# ── Runtime logs ─────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Backups ───────────────────────────────────────────────────────────────────
+backups/
+
+# ── Runtime state (paper trading data) ───────────────────────────────────────
+execution/paper_positions.json
+execution/paper_trades.json
+data/last_signals.json
+
+# ── Python artifacts ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Old/legacy files ──────────────────────────────────────────────────────────
+*.old
+*.bak
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
+crypto_trader.egg-info/
