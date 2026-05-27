@@ -94,13 +94,13 @@ def plot_signals(df, filename: str = "signals_plot.png"):
             buys = df_pd[df_pd['signal'] == 1]
             sells = df_pd[df_pd['signal'] == -1]
             
-            if not buys.empty:
+            if not buys.is_empty():
                 buy_x = buys['timestamp'] if 'timestamp' in buys.columns else buys.index
                 ax1.scatter(buy_x, buys['close'], marker='^', 
                            color='green', s=120, label='BUY Signal', 
                            zorder=5, edgecolors='darkgreen', linewidth=1.5)
             
-            if not sells.empty:
+            if not sells.is_empty():
                 sell_x = sells['timestamp'] if 'timestamp' in sells.columns else sells.index
                 ax1.scatter(sell_x, sells['close'], marker='v', 
                            color='red', s=120, label='SELL Signal', 
@@ -313,7 +313,7 @@ def plot_signal_quality_distribution(df, filename: str = "signal_quality.png"):
         # Filter out zero quality signals
         quality_scores = df_pd[df_pd['signal_quality'] > 0]['signal_quality']
         
-        if quality_scores.empty:
+        if quality_scores.is_empty():
             print("No non-zero quality scores to plot")
             return
         
