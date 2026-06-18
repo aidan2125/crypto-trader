@@ -1,0 +1,2 @@
+# utils.py
+SUPPORTED_CURRENCIES = ["USD", "ZAR"]

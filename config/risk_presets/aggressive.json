@@ -1,0 +1,12 @@
+{
+  "_comment": "Aggressive preset — NOT for beginners. Phase 6 only with proven live track record.",
+  "max_risk_per_trade": 0.03,
+  "max_positions": 8,
+  "daily_loss_limit": 0.12,
+  "max_position_pct": 0.20,
+  "trade_cooldown_hours": 1,
+  "max_trades_per_day": 20,
+  "min_signal_quality": 50,
+  "atr_stop_multiplier": 1.5,
+  "atr_take_profit_multiplier": 2.25
+}

@@ -4,7 +4,7 @@ import json
 import os
 import csv
 from datetime import datetime
-from utils import SUPPORTED_CURRENCIES
+from utils.currencies import SUPPORTED_CURRENCIES
 
 # === Dynamic Risk Management Only ===
 try:
