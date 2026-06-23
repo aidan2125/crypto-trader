@@ -12,23 +12,9 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-supabase: Client | None = None
-
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("✓ Supabase client initialized successfully")
-    except Exception as e:
-        print(f"✗ Failed to create Supabase client: {e}")
-        supabase = None
-else:
-    missing = []
-    if not SUPABASE_URL:
-        missing.append("SUPABASE_URL")
-    if not SUPABASE_KEY:
-        missing.append("SUPABASE_SERVICE_ROLE_KEY")
-    print(f"✗ Supabase not configured: Missing env vars: {', '.join(missing)}")
-    supabase = None
+# SUPABASE REMOVED — bot now uses SQLite via database/trade_logger.py
+# Kept as no-op stub so old imports don't crash at runtime.
+supabase = None
 
 
 def insert_backtest_result(backtest_data: dict) -> bool:

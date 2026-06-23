@@ -27,3 +27,11 @@
 ./scripts/strategy_comparison.py:from strategies.enhanced_signals_refactored import enhanced_strategy as new_strategy
 ./scripts/strategy_comparison.py:from data.market_data import fetch_ohlcv
 ./test_backtest_full.py:from database.supabase_db import seed_coins, insert_backtest_result
+
+
+# First time — set your vars
+export TELEGRAM_BOT_TOKEN=8381994094:AAFyw5c01OG2lFiR3Nd1xJ1EPHJ-EIcdxI
+export TELEGRAM_CHAT_ID=8381994094
+
+
+python test_telegram.py

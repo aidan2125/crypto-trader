@@ -1,0 +1,22 @@
+[
+  {
+    "coin": "ETH/USDT",
+    "action": "EXIT",
+    "direction": "SHORT",
+    "price": 3505.0,
+    "quantity": 1.5,
+    "pnl": -157.5,
+    "exit_reason": "SL",
+    "timestamp": "2026-06-23T12:20:57Z"
+  },
+  {
+    "coin": "BTC/USDT",
+    "action": "EXIT",
+    "direction": "LONG",
+    "price": 109480.0,
+    "quantity": 0.047,
+    "pnl": 211.56,
+    "exit_reason": "TP",
+    "timestamp": "2026-06-23T12:20:57Z"
+  }
+]

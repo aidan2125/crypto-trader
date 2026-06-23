@@ -67,7 +67,7 @@ def _timeframe_to_ms(timeframe: str) -> int:
 
 def fetch_ohlcv(
     symbol: str,
-    timeframe: str = "1h",          # fixed typo: was "41"
+    timeframe: str = "1h",
     limit: int = 1000,
     since: Optional[int] = None,
     params: dict = None,
@@ -98,18 +98,12 @@ def fetch_ohlcv(
         timeframe_ms = _timeframe_to_ms(timeframe)
         batch_size   = 1000
 
-        # ── Determine where to start ──────────────────────────────────────────
-        # When since is None we calculate a start timestamp so that
-        # paginating forward lands us at the most-recent `limit` candles.
-        # Without this, a bare fetch_ohlcv call with since=None only ever
-        # returns the latest 1 000 candles regardless of `limit`.
         if since is None:
-            now_ms     = int(time.time() * 1000)
+            now_ms      = int(time.time() * 1000)
             fetch_since = now_ms - (limit * timeframe_ms)
         else:
             fetch_since = since
 
-        # ── Paginate forward in batches ───────────────────────────────────────
         all_ohlcv: list[list] = []
 
         while len(all_ohlcv) < limit:
@@ -129,10 +123,8 @@ def fetch_ohlcv(
 
             all_ohlcv.extend(batch)
 
-            # Advance the cursor just past the last returned candle's timestamp
             fetch_since = batch[-1][0] + 1
 
-            # Exchange returned fewer candles than asked — we've hit the edge
             if len(batch) < current_limit:
                 break
 
@@ -140,15 +132,13 @@ def fetch_ohlcv(
             logger.warning(f"No OHLCV data returned for {symbol} {timeframe}")
             return None
 
-        # ── Deduplicate by timestamp, sort, and trim to limit ─────────────────
         unique: dict[int, list] = {}
         for candle in all_ohlcv:
             unique[candle[0]] = candle
 
         ohlcv = sorted(unique.values(), key=lambda c: c[0])
-        ohlcv = ohlcv[-limit:]   # keep the most-recent `limit` candles
+        ohlcv = ohlcv[-limit:]
 
-        # ── Build Polars DataFrame ────────────────────────────────────────────
         df = pl.DataFrame(
             ohlcv,
             schema=[
@@ -200,6 +190,124 @@ def fetch_multiple_symbols(
         if df is not None:
             results[symbol] = df
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stock OHLCV via Alpaca
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_stock_ohlcv(
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 500,
+) -> Optional[pl.DataFrame]:
+    """
+    Fetch OHLCV data for a stock ticker via Alpaca Markets data API.
+    Returns a Polars DataFrame with the same schema as fetch_ohlcv() so
+    enhanced_strategy() can consume it without modification.
+
+    Requires env vars:
+        ALPACA_API_KEY
+        ALPACA_SECRET_KEY
+    """
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    except ImportError:
+        logger.error("alpaca-py not installed. Run: pip install alpaca-py")
+        return None
+
+    api_key    = os.getenv("ALPACA_API_KEY")
+    secret_key = os.getenv("ALPACA_SECRET_KEY")
+
+    if not api_key or not secret_key:
+        logger.error("ALPACA_API_KEY / ALPACA_SECRET_KEY not set in environment")
+        return None
+
+    _TF_MAP = {
+        "1m":  TimeFrame(1,  TimeFrameUnit.Minute),
+        "5m":  TimeFrame(5,  TimeFrameUnit.Minute),
+        "15m": TimeFrame(15, TimeFrameUnit.Minute),
+        "30m": TimeFrame(30, TimeFrameUnit.Minute),
+        "1h":  TimeFrame(1,  TimeFrameUnit.Hour),
+        "2h":  TimeFrame(2,  TimeFrameUnit.Hour),
+        "4h":  TimeFrame(4,  TimeFrameUnit.Hour),
+        "1d":  TimeFrame(1,  TimeFrameUnit.Day),
+    }
+    alpaca_tf = _TF_MAP.get(timeframe.lower())
+    if alpaca_tf is None:
+        logger.error(f"Unsupported timeframe for stocks: '{timeframe}'. Use one of {list(_TF_MAP)}")
+        return None
+
+    try:
+        client = StockHistoricalDataClient(api_key, secret_key)
+
+        timeframe_ms = _timeframe_to_ms(timeframe)
+        now_ms       = int(time.time() * 1000)
+        start_ms     = now_ms - (limit * timeframe_ms)
+        start_dt     = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=alpaca_tf,
+            start=start_dt,
+            limit=limit,
+        )
+
+        bars     = client.get_stock_bars(request)
+        bar_list = bars[symbol]
+
+        if not bar_list:
+            logger.warning(f"[stocks] No data returned for {symbol}")
+            return None
+
+        rows = [
+            [
+                int(bar.timestamp.timestamp() * 1000),
+                float(bar.open),
+                float(bar.high),
+                float(bar.low),
+                float(bar.close),
+                float(bar.volume),
+            ]
+            for bar in bar_list
+        ]
+
+        unique: dict[int, list] = {}
+        for row in rows:
+            unique[row[0]] = row
+        rows = sorted(unique.values(), key=lambda r: r[0])
+        rows = rows[-limit:]
+
+        df = pl.DataFrame(
+            rows,
+            schema=[
+                ("timestamp", pl.Int64),
+                ("open",      pl.Float64),
+                ("high",      pl.Float64),
+                ("low",       pl.Float64),
+                ("close",     pl.Float64),
+                ("volume",    pl.Float64),
+            ],
+            orient="row",
+        )
+
+        df = df.with_columns(
+            pl.col("timestamp")
+            .cast(pl.Datetime(time_unit="ms", time_zone="UTC"))
+            .alias("timestamp")
+        )
+
+        df = df.sort("timestamp")
+
+        logger.info(f"[stocks] Fetched {df.height} bars for {symbol} ({timeframe})")
+        print(f"[stocks] {symbol}: {df.height} bars fetched")
+        return df
+
+    except Exception as e:
+        logger.exception(f"[stocks] Error fetching {symbol}: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
