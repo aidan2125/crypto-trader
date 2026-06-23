@@ -22,7 +22,7 @@ import polars as pl
 # ── Asset-level overrides ─────────────────────────────────────────────────────
 # Every coin that should always get a fixed mode regardless of volatility.
 ASSET_OVERRIDES: dict[str, str] = {
-    "BTC/USDT": "balanced",
+    "BTC/USDT": "strict",
     "ETH/USDT": "strict",
     "LTC/USDT": "strict",
     "ADA/USDT": "strict",

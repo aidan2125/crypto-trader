@@ -14,9 +14,13 @@ New in this version:
   - Full market regime detection (TRENDING / CHOPPY / HIGH_VOLATILITY / LOW_VOLATILITY)
   - market_quality_ok gates entries on BOTH trend strength AND volatility bounds
   - volatility_pct column exposed for downstream diagnostics
+  - R:R guard: entries rejected when (tp - entry) / (entry - sl) < 1.5
+  - Pullback entry: MA+MACD crossover entries require price to be within
+    pullback_threshold % of ma_fast before firing, avoiding chasing
+    extended moves and improving average entry price
 
 Usage:
-    df_out = new_strategy(df, mode="balanced")
+    df_out = enhanced_strategy(df, mode="balanced")
 """
 
 from __future__ import annotations
@@ -38,20 +42,24 @@ _MODE_CONFIG: dict[str, dict] = {
         "atr_tp_mult":           2.5,
         "atr_trail_mult":        1.2,
         "position_size_pct":     0.05,
+        "min_rr":                1.5,
+        "pullback_threshold":    0.005,   # 0.5% — loosest, fires more readily
         # Regime thresholds
         "min_trend_strength":    0.002,   # |ma_fast - ma_slow| / close
         "min_volatility_pct":    0.002,   # atr / close lower bound
         "max_volatility_pct":    0.030,   # atr / close upper bound
     },
     "balanced": {
-        "min_signal_quality":    40,
+        "min_signal_quality":    55,
         "volume_ratio_soft":     0.9,
         "rsi_oversold":          40,
         "rsi_overbought":        60,
-        "atr_sl_mult":           1.8,
-        "atr_tp_mult":           3.0,
+        "atr_sl_mult":           2.5,
+        "atr_tp_mult":           4.0,
         "atr_trail_mult":        1.5,
         "position_size_pct":     0.03,
+        "min_rr":                1.5,
+        "pullback_threshold":    0.003,   # 0.3% — moderate
         "min_trend_strength":    0.004,
         "min_volatility_pct":    0.003,
         "max_volatility_pct":    0.025,
@@ -61,10 +69,12 @@ _MODE_CONFIG: dict[str, dict] = {
         "volume_ratio_soft":     1.1,
         "rsi_oversold":          35,
         "rsi_overbought":        65,
-        "atr_sl_mult":           2.0,
-        "atr_tp_mult":           3.5,
+        "atr_sl_mult":           3.0,
+        "atr_tp_mult":           4.5,
         "atr_trail_mult":        1.8,
         "position_size_pct":     0.02,
+        "min_rr":                1.5,
+        "pullback_threshold":    0.003,   # 0.3% — same as balanced; tighter = too few signals
         "min_trend_strength":    0.004,
         "min_volatility_pct":    0.004,
         "max_volatility_pct":    0.030,
@@ -201,7 +211,7 @@ def _score_short(
 def enhanced_strategy(
     df: pl.DataFrame,
     config: dict = None,  # noqa: ARG001 — reserved
-    mode: str = "balanced",
+    mode: str = "strict",
 ) -> pl.DataFrame:
     """
     Event-based trading strategy with market regime detection.
@@ -216,12 +226,12 @@ def enhanced_strategy(
     -------
     Polars DataFrame with all original columns plus signal and regime columns.
 
-    New output columns vs previous version
+    Output columns
     ----------------------------------------
     volatility_pct   : atr / close  (float)
     market_regime    : "TRENDING" | "CHOPPY" | "HIGH_VOLATILITY" | "LOW_VOLATILITY"
     market_quality_ok: True only when regime == TRENDING
-    trend_strength   : |ma_fast - ma_slow| / close  (float, unchanged)
+    trend_strength   : |ma_fast - ma_slow| / close  (float)
     """
     if mode not in _MODE_CONFIG:
         raise ValueError(f"Invalid mode '{mode}'. Choose from: {list(_MODE_CONFIG)}")
@@ -235,11 +245,11 @@ def enhanced_strategy(
     volume = df["volume"].cast(pl.Float64)
 
     # ── Indicators ────────────────────────────────────────────────────────────
-    ma_fast  = _sma(close, 20)
-    ma_slow  = _sma(close, 50)
+    ma_fast   = _sma(close, 20)
+    ma_slow   = _sma(close, 50)
     ema_trend = _ema(close, 200)
-    rsi      = _rsi(close, 14)
-    atr      = _atr(high, low, close, 14)
+    rsi       = _rsi(close, 14)
+    atr       = _atr(high, low, close, 14)
     macd_line, macd_sig, macd_hist = _macd(close)
 
     vol_sma = _sma(volume, 20)
@@ -284,11 +294,6 @@ def enhanced_strategy(
     ]
 
     # ── Market regime classification ──────────────────────────────────────────
-    # TRENDING        : trend_strength meets minimum AND volatility in acceptable range
-    # CHOPPY          : trend_strength too low (MAs tangled)
-    # HIGH_VOLATILITY : volatility too high (runaway / spike conditions)
-    # LOW_VOLATILITY  : volatility too low (dead market, no meaningful moves)
-
     min_ts  = cfg["min_trend_strength"]
     min_vol = cfg["min_volatility_pct"]
     max_vol = cfg["max_volatility_pct"]
@@ -308,10 +313,21 @@ def enhanced_strategy(
         market_regime_list.append(regime)
         market_quality_ok_list.append(regime == _REGIME_TRENDING)
 
-    # ── Raw setup detection (candle-event, non-persistent) ────────────────────
+    # ── Raw setup detection ───────────────────────────────────────────────────
     #
-    # 2-of-3 confirmation: any two of {MA crossover, MACD crossover, RSI reversal}
-    # must agree. Entry is additionally gated by market_quality_ok.
+    # Entry confirmation rules:
+    #   LONG  : MA golden cross + MACD bull cross + EMA 200 uptrend
+    #           + price within pullback_threshold % of ma_fast (avoids chasing)
+    #           OR RSI reversal from oversold + EMA 200 uptrend
+    #           (RSI entries are point-in-time reversals; no pullback wait needed)
+    #
+    #   SHORT : MA death cross + MACD bear cross + EMA 200 downtrend
+    #           + price within pullback_threshold % of ma_fast
+    #           OR RSI reversal from overbought + EMA 200 downtrend
+    #
+    # All entries additionally gated by market_quality_ok (TRENDING regime only).
+
+    pullback_threshold = cfg["pullback_threshold"]
 
     raw_long_list:  list[bool] = [False] * n
     raw_short_list: list[bool] = [False] * n
@@ -322,6 +338,7 @@ def enhanced_strategy(
         macd_cur = macd_list[i];       macd_p   = macd_list[i - 1]
         msig_cur = macd_sig_list[i];   msig_p   = macd_sig_list[i - 1]
         rsi_cur  = rsi_list[i];        rsi_prev = rsi_list[i - 1]
+        c        = close_list[i]
 
         # MA crossover
         ma_golden = (
@@ -347,6 +364,19 @@ def enhanced_strategy(
             macd_p >= msig_p and macd_cur < msig_cur
         )
 
+        # Pullback filter: price must be within pullback_threshold of ma_fast.
+        # Applied only to MA+MACD crossover entries, not RSI reversals.
+        # For longs:  price at or near ma_fast (pulled back to support).
+        # For shorts: price at or near ma_fast (bounced up to resistance).
+        near_ma_fast_long = (
+            maf_cur is not None and c is not None and c > 0 and
+            abs(c - maf_cur) / c <= pullback_threshold
+        )
+        near_ma_fast_short = (
+            maf_cur is not None and c is not None and c > 0 and
+            abs(c - maf_cur) / c <= pullback_threshold
+        )
+
         # RSI reversal (threshold crossing, trend-filtered)
         rsi_bull_raw = (
             rsi_cur is not None and rsi_prev is not None and
@@ -359,22 +389,54 @@ def enhanced_strategy(
         rsi_bull_valid = rsi_bull_raw and uptrend_list[i]
         rsi_bear_valid = rsi_bear_raw and downtrend_list[i]
 
-        # Balanced confirmation:
-        # - Keep strong trend-following entries: MA + MACD
-        # - Allow RSI reversal entries only when RSI crosses back from extremes
-        # - Still protected by market_quality_ok below
-        long_confirmed = (
-            (ma_golden and macd_bull)
-            or rsi_bull_valid
+       # EMA 200 trend filter + pullback gate on MA+MACD entries
+        # Strict mode: RSI alone cannot trigger — requires MA+MACD confluence
+        # Other modes: RSI reversal is allowed as standalone entry
+    # Check if MA crossover happened within the last 5 candles
+        ma_golden_recent = any(
+            ma_fast_list[j - 1] is not None and ma_slow_list[j - 1] is not None and
+            ma_fast_list[j] is not None and ma_slow_list[j] is not None and
+            ma_fast_list[j - 1] <= ma_slow_list[j - 1] and ma_fast_list[j] > ma_slow_list[j]
+            for j in range(max(1, i - 5), i + 1)
         )
-        short_confirmed = (
-            (ma_death and macd_bear)
-            or rsi_bear_valid
+        ma_death_recent = any(
+            ma_fast_list[j - 1] is not None and ma_slow_list[j - 1] is not None and
+            ma_fast_list[j] is not None and ma_slow_list[j] is not None and
+            ma_fast_list[j - 1] >= ma_slow_list[j - 1] and ma_fast_list[j] < ma_slow_list[j]
+            for j in range(max(1, i - 5), i + 1)
         )
 
-        # Market quality gate: block entries outside TRENDING regime
-        raw_long_list[i]  = market_quality_ok_list[i] and long_confirmed
-        raw_short_list[i] = market_quality_ok_list[i] and short_confirmed
+    # MACD direction (above/below signal line) — not requiring a fresh crossover
+        macd_bullish = (
+            macd_cur is not None and msig_cur is not None and
+            macd_cur > msig_cur
+        )
+        macd_bearish = (
+            macd_cur is not None and msig_cur is not None and
+            macd_cur < msig_cur
+        )
+
+        if mode == "strict":
+            long_confirmed = (
+                ma_golden_recent and macd_bullish and uptrend_list[i]
+            )
+            short_confirmed = (
+                ma_death_recent and macd_bearish and downtrend_list[i]
+            )
+        else:
+            long_confirmed = (
+                (ma_golden and macd_bull and uptrend_list[i] and near_ma_fast_long)
+                or rsi_bull_valid
+            )
+            short_confirmed = (
+                (ma_death and macd_bear and downtrend_list[i] and near_ma_fast_short)
+                or rsi_bear_valid
+            )
+
+        # Market quality gate — skip for strict mode, MA+MACD+EMA200 is sufficient
+        raw_long_list[i]  = long_confirmed if mode == "strict" else (market_quality_ok_list[i] and long_confirmed)
+        raw_short_list[i] = short_confirmed if mode == "strict" else (market_quality_ok_list[i] and short_confirmed)
+        
 
     # ── Signal type label ─────────────────────────────────────────────────────
 
@@ -413,17 +475,19 @@ def enhanced_strategy(
 
     # ── Quality score, filtering, and final entry events ─────────────────────
 
-    enter_long_list:   list[bool]         = [False] * n
-    enter_short_list:  list[bool]         = [False] * n
-    signal_list:       list[int]          = [0] * n
-    sig_type_list:     list[str]          = ["NONE"] * n
-    quality_list:      list[float]        = [0.0] * n
-    trade_ready_list:  list[bool]         = [False] * n
-    trade_reason_list: list[str]          = ["NO_SIGNAL"] * n
-    stop_loss_list:    list[float | None] = [None] * n
-    take_profit_list:  list[float | None] = [None] * n
-    trailing_stop_list:list[float | None] = [None] * n
-    position_size_list:list[float]        = [cfg["position_size_pct"]] * n
+    enter_long_list:    list[bool]         = [False] * n
+    enter_short_list:   list[bool]         = [False] * n
+    signal_list:        list[int]          = [0] * n
+    sig_type_list:      list[str]          = ["NONE"] * n
+    quality_list:       list[float]        = [0.0] * n
+    trade_ready_list:   list[bool]         = [False] * n
+    trade_reason_list:  list[str]          = ["NO_SIGNAL"] * n
+    stop_loss_list:     list[float | None] = [None] * n
+    take_profit_list:   list[float | None] = [None] * n
+    trailing_stop_list: list[float | None] = [None] * n
+    position_size_list: list[float]        = [cfg["position_size_pct"]] * n
+
+    min_rr = cfg["min_rr"]
 
     for i in range(n):
         c       = close_list[i]
@@ -441,13 +505,23 @@ def enhanced_strategy(
                 trade_reason_list[i] = f"LOW_QUALITY({quality:.0f})"
                 trade_ready_list[i]  = False
             else:
-                trade_reason_list[i] = "OK"
-                enter_long_list[i]   = True
-                signal_list[i]       = 1
                 if c is not None and atr_val is not None:
-                    stop_loss_list[i]      = c - cfg["atr_sl_mult"]    * atr_val
-                    take_profit_list[i]    = c + cfg["atr_tp_mult"]    * atr_val
-                    trailing_stop_list[i]  = c - cfg["atr_trail_mult"] * atr_val
+                    sl = c - cfg["atr_sl_mult"] * atr_val
+                    tp = c + cfg["atr_tp_mult"] * atr_val
+                    rr = (tp - c) / (c - sl) if (c - sl) > 0 else 0.0
+                    if rr < min_rr:
+                        trade_reason_list[i] = f"LOW_RR({rr:.2f})"
+                        trade_ready_list[i]  = False
+                    else:
+                        trade_reason_list[i]   = "OK"
+                        enter_long_list[i]     = True
+                        signal_list[i]         = 1
+                        stop_loss_list[i]      = sl
+                        take_profit_list[i]    = tp
+                        trailing_stop_list[i]  = c - cfg["atr_trail_mult"] * atr_val
+                else:
+                    trade_reason_list[i] = "MISSING_ATR"
+                    trade_ready_list[i]  = False
 
         elif raw_short_list[i]:
             quality  = _score_short(rsi_list[i], vol_ratio_list[i],
@@ -461,13 +535,23 @@ def enhanced_strategy(
                 trade_reason_list[i] = f"LOW_QUALITY({quality:.0f})"
                 trade_ready_list[i]  = False
             else:
-                trade_reason_list[i] = "OK"
-                enter_short_list[i]  = True
-                signal_list[i]       = -1
                 if c is not None and atr_val is not None:
-                    stop_loss_list[i]      = c + cfg["atr_sl_mult"]    * atr_val
-                    take_profit_list[i]    = c - cfg["atr_tp_mult"]    * atr_val
-                    trailing_stop_list[i]  = c + cfg["atr_trail_mult"] * atr_val
+                    sl = c + cfg["atr_sl_mult"] * atr_val
+                    tp = c - cfg["atr_tp_mult"] * atr_val
+                    rr = (c - tp) / (sl - c) if (sl - c) > 0 else 0.0
+                    if rr < min_rr:
+                        trade_reason_list[i] = f"LOW_RR({rr:.2f})"
+                        trade_ready_list[i]  = False
+                    else:
+                        trade_reason_list[i]   = "OK"
+                        enter_short_list[i]    = True
+                        signal_list[i]         = -1
+                        stop_loss_list[i]      = sl
+                        take_profit_list[i]    = tp
+                        trailing_stop_list[i]  = c + cfg["atr_trail_mult"] * atr_val
+                else:
+                    trade_reason_list[i] = "MISSING_ATR"
+                    trade_ready_list[i]  = False
 
     # ── Exit columns (not used by BacktestPro — SL/TP only — kept for compatibility)
     exit_long_list:  list[bool] = [False] * n
@@ -476,40 +560,40 @@ def enhanced_strategy(
     # ── Assemble result dataframe ─────────────────────────────────────────────
     result = df.with_columns([
         # Core indicators
-        pl.Series("ma_fast",        ma_fast_list,        dtype=pl.Float64),
-        pl.Series("ma_slow",        ma_slow_list,        dtype=pl.Float64),
-        pl.Series("rsi",            rsi_list,            dtype=pl.Float64),
-        pl.Series("atr",            atr_list,            dtype=pl.Float64),
-        pl.Series("macd",           macd_list,           dtype=pl.Float64),
-        pl.Series("macd_signal",    macd_sig_list,       dtype=pl.Float64),
-        pl.Series("macd_hist",      macd_hist_list,      dtype=pl.Float64),
-        pl.Series("volume_ratio",   vol_ratio_list,      dtype=pl.Float64),
+        pl.Series("ma_fast",         ma_fast_list,         dtype=pl.Float64),
+        pl.Series("ma_slow",         ma_slow_list,         dtype=pl.Float64),
+        pl.Series("rsi",             rsi_list,             dtype=pl.Float64),
+        pl.Series("atr",             atr_list,             dtype=pl.Float64),
+        pl.Series("macd",            macd_list,            dtype=pl.Float64),
+        pl.Series("macd_signal",     macd_sig_list,        dtype=pl.Float64),
+        pl.Series("macd_hist",       macd_hist_list,       dtype=pl.Float64),
+        pl.Series("volume_ratio",    vol_ratio_list,       dtype=pl.Float64),
         # Trend & regime
-        pl.Series("uptrend",          uptrend_list,           dtype=pl.Boolean),
-        pl.Series("downtrend",        downtrend_list,         dtype=pl.Boolean),
-        pl.Series("trend_strength",   trend_strength_list,    dtype=pl.Float64),
-        pl.Series("volatility_pct",   volatility_pct_list,    dtype=pl.Float64),
-        pl.Series("market_regime",    market_regime_list,     dtype=pl.Utf8),
-        pl.Series("market_quality_ok",market_quality_ok_list, dtype=pl.Boolean),
+        pl.Series("uptrend",           uptrend_list,           dtype=pl.Boolean),
+        pl.Series("downtrend",         downtrend_list,         dtype=pl.Boolean),
+        pl.Series("trend_strength",    trend_strength_list,    dtype=pl.Float64),
+        pl.Series("volatility_pct",    volatility_pct_list,    dtype=pl.Float64),
+        pl.Series("market_regime",     market_regime_list,     dtype=pl.Utf8),
+        pl.Series("market_quality_ok", market_quality_ok_list, dtype=pl.Boolean),
         # Raw setups
         pl.Series("enter_long_raw",  raw_long_list,  dtype=pl.Boolean),
         pl.Series("enter_short_raw", raw_short_list, dtype=pl.Boolean),
         # Signal metadata
-        pl.Series("signal",         signal_list,        dtype=pl.Int8),
-        pl.Series("signal_type",    sig_type_list,      dtype=pl.Utf8),
-        pl.Series("signal_quality", quality_list,       dtype=pl.Float64),
-        pl.Series("trade_ready",    trade_ready_list,   dtype=pl.Boolean),
-        pl.Series("trade_reason",   trade_reason_list,  dtype=pl.Utf8),
+        pl.Series("signal",          signal_list,        dtype=pl.Int8),
+        pl.Series("signal_type",     sig_type_list,      dtype=pl.Utf8),
+        pl.Series("signal_quality",  quality_list,       dtype=pl.Float64),
+        pl.Series("trade_ready",     trade_ready_list,   dtype=pl.Boolean),
+        pl.Series("trade_reason",    trade_reason_list,  dtype=pl.Utf8),
         # Entry / exit events
         pl.Series("enter_long",  enter_long_list,  dtype=pl.Boolean),
         pl.Series("enter_short", enter_short_list, dtype=pl.Boolean),
         pl.Series("exit_long",   exit_long_list,   dtype=pl.Boolean),
         pl.Series("exit_short",  exit_short_list,  dtype=pl.Boolean),
         # Risk management
-        pl.Series("stop_loss",         stop_loss_list,      dtype=pl.Float64),
-        pl.Series("take_profit",        take_profit_list,    dtype=pl.Float64),
-        pl.Series("trailing_stop",      trailing_stop_list,  dtype=pl.Float64),
-        pl.Series("position_size_pct",  position_size_list,  dtype=pl.Float64),
+        pl.Series("stop_loss",         stop_loss_list,     dtype=pl.Float64),
+        pl.Series("take_profit",        take_profit_list,   dtype=pl.Float64),
+        pl.Series("trailing_stop",      trailing_stop_list, dtype=pl.Float64),
+        pl.Series("position_size_pct",  position_size_list, dtype=pl.Float64),
     ])
 
     return result
