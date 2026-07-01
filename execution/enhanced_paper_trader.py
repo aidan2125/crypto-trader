@@ -149,8 +149,8 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
             return "ERROR: ATR required (>0)"
 
         approx_sl, _ = calculate_dynamic_sl_tp(price, atr, "BUY", config)
-        calc_size = calc_position_size(account["cash"], price, approx_sl, config)
-
+        calc_size = calc_position_size(account["cash"], price, approx_sl, config.get("max_loss_per_trade_pct", 0.02))
+        
         calc_size = trade_size or calc_size
         if calc_size <= 0:
             return "SIZE TOO SMALL"

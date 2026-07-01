@@ -33,7 +33,7 @@ cryptography==42.0.8
 # supabase==2.0.0   # Uncomment if using Supabase
 
 # ── Optional: polars (DO NOT USE on Android — use pandas instead) ────────────
-# polars==0.20.31   # x86/VPS only
+ polars==0.20.31   # x86/VPS only
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.2.2
