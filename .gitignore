@@ -49,3 +49,6 @@ Thumbs.db
 
 # ── Build artifacts ───────────────────────────────────────────────────────────
 crypto_trader.egg-info/
+data/heartbeat.json
+data/trades.db
+reports/*.png
