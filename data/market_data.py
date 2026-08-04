@@ -214,6 +214,7 @@ def fetch_stock_ohlcv(
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from alpaca.data.enums import DataFeed
     except ImportError:
         logger.error("alpaca-py not installed. Run: pip install alpaca-py")
         return None
@@ -253,10 +254,15 @@ def fetch_stock_ohlcv(
             timeframe=alpaca_tf,
             start=start_dt,
             limit=limit,
+            feed=DataFeed.IEX,
         )
 
         bars     = client.get_stock_bars(request)
-        bar_list = bars[symbol]
+        try:
+            bar_list = bars[symbol]
+        except KeyError:
+            logger.warning(f"[stocks] No data returned for {symbol}")
+            return None
 
         if not bar_list:
             logger.warning(f"[stocks] No data returned for {symbol}")

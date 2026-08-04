@@ -7,12 +7,13 @@ import os
 import logging
 import json
 import fcntl                                          # CHANGE: added for file locking
-from datetime import datetime
+from datetime import datetime,timezone
 from functools import wraps                           # CHANGE: added for auth decorator
 from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from dotenv import load_dotenv
+load_dotenv()
 # ─────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────
@@ -100,11 +101,12 @@ def check_trading_bot_health() -> tuple[bool, float | None]:
         return False, None
     try:
         ts = datetime.fromisoformat(ts_str)
-        age = (datetime.now() - ts).total_seconds()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
         return age < STALE_DATA_THRESHOLD, age
     except ValueError:
         return False, None
-
 
 # ─────────────────────────────────────────────
 # Command handlers

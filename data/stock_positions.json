@@ -1,0 +1,13 @@
+{
+  "COIN": {
+    "entry_price": 170.495,
+    "shares": 91,
+    "cost": 15515.045,
+    "stop_loss": 165.7502,
+    "take_profit": 183.1479,
+    "currency": "USD",
+    "entry_time": "2026-07-21T13:32:27.918152+00:00",
+    "atr_at_entry": 3.1632142857142873,
+    "order_id": "4f1b0f10-e588-44a7-85cf-ddfdab977cc2"
+  }
+}

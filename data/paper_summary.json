@@ -1,16 +1,17 @@
 {
     "BTC/USDT": {
-        "trades": 1,
-        "total_pnl": -4.914678714488911,
-        "wins": 0,
+        "trades": 2,
+        "total_pnl": -4.315628239726292,
+        "wins": 1,
         "losses": 1,
         "breakeven": 0,
         "exit_types": {
-            "STOP_LOSS": 1
+            "STOP_LOSS": 1,
+            "TAKE_PROFIT": 1
         }
     },
-    "total_pnl": -4.91,
-    "total_wins": 0,
+    "total_pnl": -4.32,
+    "total_wins": 1,
     "total_losses": 1,
-    "win_rate": 0.0
+    "win_rate": 50.0
 }

@@ -17,6 +17,7 @@ try:
         check_max_positions,
         ENHANCED_RISK_CONFIG
     )
+    from risk.daily_pnl import get_daily_realized_pnl
 except ImportError as e:
     print(f"Risk module import error: {e}")
     raise
@@ -30,8 +31,8 @@ CSV_FILE = "logs/paper_trades.csv"
 
 # Default balances
 DEFAULT_BALANCES = {
-    "USD": {"cash": 1000.0},
-    "ZAR": {"cash": 18500.0}  # ~1000 USD
+    "USD": {"cash": 54.05},
+    "ZAR": {"cash": 1000.0}  # ~54 USD
 }
 
 # ZAR to USD rate
@@ -138,27 +139,58 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
     # --- BUY ---
     if signal == 1:
         if position:
-            return f"{coin} ALREADY IN POSITION @ ${position.get('entry_price', 0.0):.2f}"
+            msg = f"{coin} ALREADY IN POSITION @ ${position.get('entry_price', 0.0):.2f}"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
+
+        equity = account["cash"] + sum(p.get("trade_size", 0.0) for p in positions.values())
+        daily_pnl_account = get_daily_realized_pnl()
+        daily_pnl_coin = get_daily_realized_pnl(symbol=coin)
+        max_account_loss = equity * config.get("max_daily_loss_pct_account", 0.03)
+        max_coin_loss = equity * config.get("max_daily_loss_pct_coin", 0.02)
+
+        if daily_pnl_account < 0 and abs(daily_pnl_account) >= max_account_loss:
+            msg = f"ACCOUNT DAILY LOSS LIMIT HIT: {daily_pnl_account:+.2f} (limit: -{max_account_loss:.2f}) - all new entries blocked"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
+
+        if daily_pnl_coin < 0 and abs(daily_pnl_coin) >= max_coin_loss:
+            msg = f"{coin} DAILY LOSS LIMIT HIT: {daily_pnl_coin:+.2f} (limit: -{max_coin_loss:.2f}) - entries for {coin} blocked"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         if not override_risk:
             can_open, current, max_pos = check_max_positions(len(positions), config)
             if not can_open:
-                return f"MAX POSITIONS: {current}/{max_pos}"
+                msg = f"MAX POSITIONS: {current}/{max_pos}"
+                return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                        "size_usd": None, "stop_loss": None, "take_profit": None,
+                        "pnl": None, "exit_reason": None}
 
         if atr is None or atr <= 0:
-            return "ERROR: ATR required (>0)"
+            return {"success": False, "action": "BUY", "message": "ERROR: ATR required (>0)",
+                    "quantity": 0, "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         approx_sl, _ = calculate_dynamic_sl_tp(price, atr, "BUY", config)
         calc_size = calc_position_size(account["cash"], price, approx_sl, config.get("max_loss_per_trade_pct", 0.02))
         
         calc_size = trade_size or calc_size
         if calc_size <= 0:
-            return "SIZE TOO SMALL"
+            return {"success": False, "action": "BUY", "message": "SIZE TOO SMALL",
+                    "quantity": 0, "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         fees_info = calculate_fees_and_slippage(calc_size, config)
         total_cost = calc_size + fees_info["total_cost"]
         if account["cash"] < total_cost:
-            return f"INSUFFICIENT FUNDS: need ${total_cost:.2f}"
+            msg = f"INSUFFICIENT FUNDS: need ${total_cost:.2f}"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         effective_price = price * (1 + config.get("slippage_pct", 0.0005))
         sl, tp = calculate_dynamic_sl_tp(effective_price, atr, "BUY", config)
@@ -181,12 +213,17 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
         log_trade(f"BUY {coin} @ {effective_price:.2f} | ${calc_size:.2f}")
         log_trade_csv(timestamp, "BUY", coin, effective_price, calc_size, 0.0, currency)
 
-        return f"BUY {coin} @ ${effective_price:.2f}\nSize: ${calc_size:.2f}\nSL: ${sl:.2f} | TP: ${tp:.2f}"
+        msg = f"BUY {coin} @ ${effective_price:.2f}\nSize: ${calc_size:.2f}\nSL: ${sl:.2f} | TP: ${tp:.2f}"
+        return {"success": True, "action": "BUY", "message": msg,
+                "quantity": calc_size / effective_price, "size_usd": calc_size,
+                "stop_loss": sl, "take_profit": tp, "pnl": None, "exit_reason": None}
 
     # --- SELL ---
     if signal == -1:
         if not position:
-            return f"{coin} NO POSITION"
+            return {"success": False, "action": "SELL", "message": f"{coin} NO POSITION",
+                    "quantity": 0, "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         entry = position["entry_price"]
         size = position["trade_size"]
@@ -220,15 +257,23 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
         save_json(POSITIONS_FILE, positions)
         save_json(BALANCE_FILE, balances)
 
-        return f"SELL {coin} @ ${effective_price:.2f}\nPnL: {net_pnl:+.2f} {pos_curr}\nExit: {exit_type}"
+        msg = f"SELL {coin} @ ${effective_price:.2f}\nPnL: {net_pnl:+.2f} {pos_curr}\nExit: {exit_type}"
+        return {"success": True, "action": "SELL", "message": msg, "quantity": num_coins,
+                "size_usd": size, "stop_loss": sl, "take_profit": tp, "pnl": net_pnl,
+                "exit_reason": exit_type}
 
     # --- HOLD ---
     if position:
         unreal = (price - position["entry_price"]) * (position["trade_size"] / position["entry_price"])
         pct = unreal / position["trade_size"] * 100
-        return f"HOLD {coin}\nUnreal: {unreal:+.2f} ({pct:+.1f}%)"
+        msg = f"HOLD {coin}\nUnreal: {unreal:+.2f} ({pct:+.1f}%)"
+        return {"success": True, "action": "HOLD", "message": msg, "quantity": 0,
+                "size_usd": None, "stop_loss": position.get("stop_loss"),
+                "take_profit": position.get("take_profit"), "pnl": unreal, "exit_reason": None}
 
-    return f"{coin} NO POSITION"
+    return {"success": False, "action": None, "message": f"{coin} NO POSITION", "quantity": 0,
+            "size_usd": None, "stop_loss": None, "take_profit": None, "pnl": None,
+            "exit_reason": None}
 
 
 # ------------------- Summary Display -------------------

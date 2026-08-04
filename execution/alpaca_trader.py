@@ -147,10 +147,16 @@ def execute_stock_trade(
     # ── BUY ──────────────────────────────────────────────────────────────────
     if signal == 1:
         if ticker in positions:
-            return f"[SKIP] Already holding {ticker}"
+            msg = f"[SKIP] Already holding {ticker}"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         if len(positions) >= max_positions:
-            return f"[SKIP] Max positions ({max_positions}) reached"
+            msg = f"[SKIP] Max positions ({max_positions}) reached"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         # Position sizing — same ATR-based logic as your paper trader
         if atr and atr > 0:
@@ -204,14 +210,22 @@ def execute_stock_trade(
             )
             logging.info(f"[alpaca_trader] {result}")
             _log_trade(ticker, "BUY", shares, price, stop_loss, take_profit, cost)
-            return result
+            return {"success": True, "action": "BUY", "message": result, "quantity": shares,
+                    "size_usd": cost, "stop_loss": stop_loss, "take_profit": take_profit,
+                    "pnl": None, "exit_reason": None}
         else:
-            return f"[ERROR] Order failed for {ticker} BUY"
+            msg = f"[ERROR] Order failed for {ticker} BUY"
+            return {"success": False, "action": "BUY", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": stop_loss, "take_profit": take_profit,
+                    "pnl": None, "exit_reason": None}
 
     # ── SELL / Close ──────────────────────────────────────────────────────────
     elif signal == -1 or override_risk:
         if ticker not in positions:
-            return f"[SKIP] No position in {ticker} to close"
+            msg = f"[SKIP] No position in {ticker} to close"
+            return {"success": False, "action": "SELL", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
         position = positions[ticker]
         shares       = position.get("shares", 1)
@@ -243,9 +257,14 @@ def execute_stock_trade(
             )
             logging.info(f"[alpaca_trader] {result}")
             _log_trade(ticker, "SELL", shares, price, pnl=pnl)
-            return result
+            return {"success": True, "action": "SELL", "message": result, "quantity": shares,
+                    "size_usd": cost, "stop_loss": None, "take_profit": None, "pnl": pnl,
+                    "exit_reason": "MANUAL"}
         else:
-            return f"[ERROR] Order failed for {ticker} SELL"
+            msg = f"[ERROR] Order failed for {ticker} SELL"
+            return {"success": False, "action": "SELL", "message": msg, "quantity": 0,
+                    "size_usd": None, "stop_loss": None, "take_profit": None,
+                    "pnl": None, "exit_reason": None}
 
     return None
 

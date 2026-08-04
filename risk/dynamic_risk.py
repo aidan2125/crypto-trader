@@ -8,6 +8,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+
 RISK_CONFIG_FILE = Path("data") / "risk_config.json"
 
 # Enhanced risk configuration
@@ -35,7 +36,13 @@ ENHANCED_RISK_CONFIG = {
     # Portfolio Risk
     "max_portfolio_risk": 0.20,
     "max_loss_per_trade_pct": 0.02,     # Max 2% loss per trade
+  
+
+    # Daily Circuit Breaker
+    "max_daily_loss_pct_account": 0.03,  # Halt ALL new entries if today's account-wide realized loss exceeds 3% of equity
+    "max_daily_loss_pct_coin": 0.02,     # Halt entries for a SPECIFIC coin if today's realized loss on that coin exceeds 2% of equity
 }
+
 
 def check_max_positions(current_positions: int, config: dict = None) -> tuple[bool, int, int]:
     """

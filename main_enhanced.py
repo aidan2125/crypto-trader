@@ -14,19 +14,24 @@ import os
 import time
 import time as _time
 import argparse
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Callable, Optional
 
-import polars as pl
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+except ImportError:
+    pl = None
+    POLARS_AVAILABLE = False
 
+from dotenv import load_dotenv
+load_dotenv()
 # ─────────────────────────────────────────────────────────────────────────────
 # TRADING MODE — change this or pass --mode on the CLI
 # ─────────────────────────────────────────────────────────────────────────────
 TRADING_MODE = "dual"   # "crypto" | "stocks" | "dual"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Cooldown tracking — prevents re-entry after a stop-loss
-# ─────────────────────────────────────────────────────────────────────────────
-_stop_out_cooldown: dict[str, float] = {}
 COOLDOWN_SECONDS = 3600  # 1 hour cooldown after a stop-loss hit
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +85,72 @@ DEFAULT_CURRENCY = "USD"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fix #2 — Cooldown tracking, wrapped instead of a bare module-level dict.
+# Same in-memory behaviour as before (still lost on restart — that's a
+# separate, deliberate future step: persist to disk if/when you want a
+# restart to remember an active cooldown). For now this just gives every
+# call site one interface instead of three places poking a raw dict.
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class CooldownTracker:
+    cooldown_seconds: int
+    _last_stop: dict = field(default_factory=dict)
+
+    def is_active(self, key: str) -> tuple[bool, int]:
+        """Returns (active, minutes_remaining)."""
+        last_stop = self._last_stop.get(key, 0)
+        remaining = self.cooldown_seconds - (_time.time() - last_stop)
+        if remaining <= 0:
+            return False, 0
+        return True, int(remaining // 60)
+
+    def start(self, key: str) -> None:
+        self._last_stop[key] = _time.time()
+
+
+_cooldown = CooldownTracker(COOLDOWN_SECONDS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix #3 — Exception handling that distinguishes "this symbol had a bad
+# cycle, log it and move on" from "something is actually broken and hiding
+# this would be worse than crashing." We don't have your exact ccxt/Alpaca
+# exception classes in front of us, so this works off the error message
+# rather than exception types — safer than guessing at import paths that
+# might not match your installed library versions. Extend FATAL_MARKERS
+# as you hit real cases.
+# ─────────────────────────────────────────────────────────────────────────────
+FATAL_ERROR_MARKERS = (
+    "authenticat",       # authentication / authenticated
+    "unauthorized",
+    "invalid api key",
+    "invalid api-key",
+    "permission denied",
+    "403",
+    "401",
+    "database disk image is malformed",
+    "disk i/o error",
+    "no space left on device",
+)
+
+
+def _is_fatal(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in FATAL_ERROR_MARKERS)
+
+
+def _handle_symbol_error(exc: Exception, label: str) -> None:
+    """Log-and-continue for ordinary errors; re-raise for the fatal set
+    so the run loop / systemd sees it instead of silently retrying forever."""
+    if _is_fatal(exc):
+        logging.critical(f"{label}: FATAL error, stopping bot: {exc}")
+        print(f"FATAL {label}: {exc} — bot is stopping, this needs attention")
+        raise exc
+    logging.error(f"{label}: {exc}")
+    print(f"ERROR {label}: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared alert helper
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -112,29 +183,47 @@ def send_all_alerts(message: str, coin: str = "") -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CRYPTO — run_for_coin()
+# Fix #1 — Unified core. run_for_coin() and run_for_stock() were ~110 lines
+# each, identical except for: data source, cooldown key, execute call,
+# asset_type string, field label ("Coin"/"Ticker"), alert title, and
+# whether a signal plot gets written. Everything else — cooldown check,
+# trade execution, SQLite logging (trade + signal), alert building,
+# last-signal persistence — was byte-for-byte the same logic duplicated
+# twice. This collapses it to one function; run_for_coin/run_for_stock
+# below become thin adapters that just supply the asset-specific bits.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_for_coin(coin: str):
+def run_for_symbol(
+    symbol: str,
+    *,
+    asset_type: str,                       # "crypto" | "stock"
+    fetch_fn: Callable[[], object],         # zero-arg callable -> df
+    currency: str,
+    execute_fn: Callable[[str, int, float, str, Optional[float]], dict],
+    cooldown_key: str,
+    field_label: str,                      # "Coin" or "Ticker"
+    signal_title: str,                      # "SIGNAL CHANGE" / "STOCK SIGNAL CHANGE"
+    log_prefix: str = "",                  # "" for crypto, "[stocks] " for stocks
+    do_plot: bool = False,
+    strategy_mode: str = "strict",
+) -> None:
     try:
-        currency  = COIN_CURRENCY.get(coin, DEFAULT_CURRENCY)
-        timeframe = "4h" if any(x in coin for x in ["BTC", "ETH"]) else "1h"
-
-        df = fetch_ohlcv(symbol=coin, timeframe=timeframe)
+        df = fetch_fn()
         if df is None or df.is_empty():
-            logging.warning(f"{coin}: No data")
+            logging.warning(f"{log_prefix}{symbol}: No data")
             return
 
-        df = enhanced_strategy(df, mode="strict")
+        df = enhanced_strategy(df, mode=strategy_mode)
 
         if "signal" not in df.columns:
-            logging.warning(f"{coin}: No signal generated")
+            logging.warning(f"{log_prefix}{symbol}: No signal generated")
             return
 
-        try:
-            plot_signals(df, filename=f"{coin.replace('/', '_')}_signals.png")
-        except Exception as e:
-            logging.error(f"{coin}: Plot error: {e}")
+        if do_plot:
+            try:
+                plot_signals(df, filename=f"{symbol.replace('/', '_')}_signals.png")
+            except Exception as e:
+                logging.error(f"{symbol}: Plot error: {e}")
 
         last_row       = df.tail(1)
         current_signal = int(last_row["signal"][0])   if "signal" in last_row.columns else 0
@@ -148,52 +237,51 @@ def run_for_coin(coin: str):
         if "signal_quality" in last_row.columns and last_row["signal_quality"][0] is not None:
             signal_quality = float(last_row["signal_quality"][0])
 
-        if current_signal not in [-1, 0, 1]:
-            logging.warning(f"{coin}: Invalid signal {current_signal}")
+        if current_signal not in (-1, 0, 1):
+            logging.warning(f"{log_prefix}{symbol}: Invalid signal {current_signal}")
             return
 
         # ── Cooldown check ────────────────────────────────────────────────────
-        now = _time.time()
         if current_signal in (1, -1):
-            last_stop = _stop_out_cooldown.get(coin, 0)
-            remaining = COOLDOWN_SECONDS - (now - last_stop)
-            if remaining > 0:
-                mins_left = int(remaining // 60)
-                logging.info(f"{coin}: Skipping signal — cooldown active ({mins_left}m left)")
-                print(f"  [{coin}] Cooldown active — {mins_left}m remaining, skipping signal")
+            active, mins_left = _cooldown.is_active(cooldown_key)
+            if active:
+                logging.info(f"{log_prefix}{symbol}: Skipping signal — cooldown active ({mins_left}m left)")
+                print(f"  [{symbol}] Cooldown active — {mins_left}m remaining, skipping signal")
                 return
 
         last_signals    = load_last_signals()
-        previous_signal = last_signals.get(coin)
+        previous_signal = last_signals.get(cooldown_key)
 
         trade_result = None
         if current_signal != previous_signal:
-            trade_result = execute_paper_trade(
-                coin=coin,
-                signal=current_signal,
-                price=price,
-                currency=currency,
-                atr=atr,
-            )
+            trade_result = execute_fn(symbol, current_signal, price, currency, atr)
 
             # ── Stop-loss cooldown ────────────────────────────────────────────
-            if trade_result and "STOP_LOSS" in str(trade_result):
-                _stop_out_cooldown[coin] = _time.time()
-                logging.info(f"{coin}: Stop-loss hit — cooldown started ({COOLDOWN_SECONDS//60}m)")
-                print(f"  [{coin}] Stop-loss hit — cooldown started ({COOLDOWN_SECONDS//60}m)")
+            _exit_reason = trade_result.get("exit_reason") if isinstance(trade_result, dict) else None
+            if _exit_reason == "STOP_LOSS" or (trade_result and not isinstance(trade_result, dict) and "STOP_LOSS" in str(trade_result)):
+                _cooldown.start(cooldown_key)
+                logging.info(f"{log_prefix}{symbol}: Stop-loss hit — cooldown started ({COOLDOWN_SECONDS//60}m)")
+                print(f"  [{symbol}] Stop-loss hit — cooldown started ({COOLDOWN_SECONDS//60}m)")
 
             # ── Log trade to SQLite ───────────────────────────────────────────
-            if trade_result:
+            # STOPGAP: trade_result is currently a plain string in most real
+            # paths (execute_paper_trade / execute_stock_trade return
+            # f-strings, not dicts). Calling .get() on a string crashed this
+            # function before reaching save_last_signals — confirmed live via
+            # "'str' object has no attribute 'get'" in logs/bot.log.
+            # Real fix: make execute_paper_trade/execute_stock_trade always
+            # return a dict. Tracked separately.
+            if isinstance(trade_result, dict):
                 _direction = "LONG"  if current_signal == 1  else \
                              "SHORT" if current_signal == -1 else "FLAT"
                 _action    = "ENTRY" if current_signal in (1, -1) else "EXIT"
                 _trade_logger.log_trade(
-                    symbol         = coin,
+                    symbol         = symbol,
                     action         = _action,
                     direction      = _direction,
                     price          = price,
                     quantity       = trade_result.get("quantity", 0),
-                    asset_type     = "crypto",
+                    asset_type     = asset_type,
                     position_size  = trade_result.get("size_usd"),
                     stop_loss      = trade_result.get("stop_loss"),
                     take_profit    = trade_result.get("take_profit"),
@@ -201,19 +289,38 @@ def run_for_coin(coin: str):
                     exit_reason    = trade_result.get("exit_reason"),
                     atr            = atr,
                     signal_quality = signal_quality,
-                    strategy_mode  = "strict",
+                    strategy_mode  = strategy_mode,
+                )
+            elif trade_result:
+                # String result — still get it into trades.db, just without
+                # the structured numeric fields we can't pull out of a string.
+                _direction = "LONG"  if current_signal == 1  else \
+                             "SHORT" if current_signal == -1 else "FLAT"
+                _action    = "ENTRY" if current_signal in (1, -1) else "EXIT"
+                logging.info(f"{log_prefix}{symbol}: trade_result was a string, not a dict — logging message only")
+                _trade_logger.log_trade(
+                    symbol         = symbol,
+                    action         = _action,
+                    direction      = _direction,
+                    price          = price,
+                    quantity       = 0,
+                    asset_type     = asset_type,
+                    exit_reason    = str(trade_result)[:200],
+                    atr            = atr,
+                    signal_quality = signal_quality,
+                    strategy_mode  = strategy_mode,
                 )
 
         # ── Log signal every cycle to SQLite ─────────────────────────────────
         _trade_logger.log_signal(
-            symbol         = coin,
+            symbol         = symbol,
             new_signal     = current_signal,
             prev_signal    = previous_signal,
             price          = price,
-            asset_type     = "crypto",
+            asset_type     = asset_type,
             atr            = atr,
             signal_quality = signal_quality,
-            strategy_mode  = "strict",
+            strategy_mode  = strategy_mode,
             acted_on       = trade_result is not None,
         )
 
@@ -223,8 +330,8 @@ def run_for_coin(coin: str):
             signal_name  = signal_names.get(current_signal, str(current_signal))
 
             message_parts = [
-                "**SIGNAL CHANGE**",
-                f"Coin:     {coin}",
+                f"**{signal_title}**",
+                f"{(field_label + ':').ljust(10)}{symbol}",
                 f"Signal:   {signal_name}",
                 f"Price:    ${price:.2f} {currency}",
                 f"Previous: {signal_names.get(previous_signal, 'None')}",
@@ -233,16 +340,20 @@ def run_for_coin(coin: str):
                 message_parts.append(f"ATR:      ${atr:.2f}")
             if signal_quality is not None:
                 message_parts.append(f"Quality:  {signal_quality:.0f}/100")
-            message_parts.append(f"\nTrade: {trade_result or 'No action'}")
+            if isinstance(trade_result, dict):
+                _trade_display = trade_result.get("message", "No action")
+            else:
+                _trade_display = trade_result or "No action"
+            message_parts.append(f"\nTrade: {_trade_display}")
 
             message      = "\n".join(message_parts)
-            alert_results = send_all_alerts(message, coin)
+            alert_results = send_all_alerts(message, symbol)
             alerts_sent  = ", ".join(k for k, v in alert_results.items() if v)
 
-            last_signals[coin] = current_signal
+            last_signals[cooldown_key] = current_signal
             save_last_signals(last_signals)
 
-            log_msg = f"{coin}: {previous_signal} → {current_signal}"
+            log_msg = f"{log_prefix}{symbol}: {previous_signal} → {current_signal}"
             if signal_quality is not None:
                 log_msg += f" | Quality: {signal_quality:.0f}"
             log_msg += f" | Alerts: {alerts_sent}"
@@ -250,153 +361,60 @@ def run_for_coin(coin: str):
             print(f"\n{message}\nAlerts: {alerts_sent}\n")
 
         else:
-            logging.info(f"{coin}: No change (signal {current_signal})")
+            logging.info(f"{log_prefix}{symbol}: No change (signal {current_signal})")
 
     except Exception as e:
-        logging.error(f"{coin} error: {e}")
-        print(f"ERROR {coin}: {e}")
+        _handle_symbol_error(e, f"{log_prefix}{symbol}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STOCKS — run_for_stock()
+# Thin adapters — asset-specific wiring only. All shared logic now lives in
+# run_for_symbol() above, so a bugfix there (like today's circuit breaker)
+# only needs to happen once.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_for_stock(ticker: str, risk_config: dict | None = None):
-    try:
-        currency = STOCK_CURRENCY.get(ticker, "USD")
-        df       = fetch_stock_ohlcv(symbol=ticker, timeframe="1h", limit=500)
+def run_for_coin(coin: str) -> None:
+    currency  = COIN_CURRENCY.get(coin, DEFAULT_CURRENCY)
+    timeframe = "4h" if any(x in coin for x in ["BTC", "ETH"]) else "1h"
 
-        if df is None or df.is_empty():
-            logging.warning(f"[stocks] {ticker}: No data")
-            return
+    def _execute(symbol, signal, price, currency, atr):
+        return execute_paper_trade(coin=symbol, signal=signal, price=price, currency=currency, atr=atr)
 
-        df = enhanced_strategy(df, mode="strict")
+    run_for_symbol(
+        coin,
+        asset_type   = "crypto",
+        fetch_fn     = lambda: fetch_ohlcv(symbol=coin, timeframe=timeframe),
+        currency     = currency,
+        execute_fn   = _execute,
+        cooldown_key = coin,
+        field_label  = "Coin",
+        signal_title = "SIGNAL CHANGE",
+        log_prefix   = "",
+        do_plot      = True,
+    )
 
-        if "signal" not in df.columns:
-            logging.warning(f"[stocks] {ticker}: No signal generated")
-            return
 
-        last_row       = df.tail(1)
-        current_signal = int(last_row["signal"][0])   if "signal" in last_row.columns else 0
-        price          = float(last_row["close"][0])  if "close"  in last_row.columns else 0.0
+def run_for_stock(ticker: str, risk_config: dict | None = None) -> None:
+    currency = STOCK_CURRENCY.get(ticker, "USD")
 
-        atr = None
-        if "atr" in last_row.columns and last_row["atr"][0] is not None:
-            atr = float(last_row["atr"][0])
-
-        signal_quality = None
-        if "signal_quality" in last_row.columns and last_row["signal_quality"][0] is not None:
-            signal_quality = float(last_row["signal_quality"][0])
-
-        if current_signal not in [-1, 0, 1]:
-            logging.warning(f"[stocks] {ticker}: Invalid signal {current_signal}")
-            return
-
-        # ── Cooldown check ────────────────────────────────────────────────────
-        now        = _time.time()
-        stock_key  = f"STOCK:{ticker}"
-        if current_signal in (1, -1):
-            last_stop = _stop_out_cooldown.get(stock_key, 0)
-            remaining = COOLDOWN_SECONDS - (now - last_stop)
-            if remaining > 0:
-                mins_left = int(remaining // 60)
-                logging.info(f"[stocks] {ticker}: Skipping signal — cooldown active ({mins_left}m left)")
-                print(f"  [{ticker}] Cooldown active — {mins_left}m remaining, skipping signal")
-                return
-
-        last_signals    = load_last_signals()
-        previous_signal = last_signals.get(stock_key)
-
-        trade_result = None
-        if current_signal != previous_signal:
-            trade_result = execute_stock_trade(
-                ticker      = ticker,
-                signal      = current_signal,
-                price       = price,
-                currency    = currency,
-                atr         = atr,
-                risk_config = risk_config,
-            )
-
-            # ── Stop-loss cooldown ────────────────────────────────────────────
-            if trade_result and "STOP_LOSS" in str(trade_result):
-                _stop_out_cooldown[stock_key] = _time.time()
-                logging.info(f"[stocks] {ticker}: Stop-loss hit — cooldown started ({COOLDOWN_SECONDS//60}m)")
-                print(f"  [{ticker}] Stop-loss hit — cooldown started ({COOLDOWN_SECONDS//60}m)")
-
-            # ── Log trade to SQLite ───────────────────────────────────────────
-            if trade_result:
-                _direction = "LONG"  if current_signal == 1  else \
-                             "SHORT" if current_signal == -1 else "FLAT"
-                _action    = "ENTRY" if current_signal in (1, -1) else "EXIT"
-                _trade_logger.log_trade(
-                    symbol         = ticker,
-                    action         = _action,
-                    direction      = _direction,
-                    price          = price,
-                    quantity       = trade_result.get("quantity", 0),
-                    asset_type     = "stock",
-                    position_size  = trade_result.get("size_usd"),
-                    stop_loss      = trade_result.get("stop_loss"),
-                    take_profit    = trade_result.get("take_profit"),
-                    pnl            = trade_result.get("pnl"),
-                    exit_reason    = trade_result.get("exit_reason"),
-                    atr            = atr,
-                    signal_quality = signal_quality,
-                    strategy_mode  = "strict",
-                )
-
-        # ── Log signal every cycle to SQLite ─────────────────────────────────
-        _trade_logger.log_signal(
-            symbol         = ticker,
-            new_signal     = current_signal,
-            prev_signal    = previous_signal,
-            price          = price,
-            asset_type     = "stock",
-            atr            = atr,
-            signal_quality = signal_quality,
-            strategy_mode  = "strict",
-            acted_on       = trade_result is not None,
+    def _execute(symbol, signal, price, currency, atr):
+        return execute_stock_trade(
+            ticker=symbol, signal=signal, price=price, currency=currency,
+            atr=atr, risk_config=risk_config,
         )
 
-        if current_signal != previous_signal:
-            # ── Build & send alert ────────────────────────────────────────────
-            signal_names = {-1: "SELL", 0: "HOLD", 1: "BUY"}
-            signal_name  = signal_names.get(current_signal, str(current_signal))
-
-            message_parts = [
-                "**STOCK SIGNAL CHANGE**",
-                f"Ticker:   {ticker}",
-                f"Signal:   {signal_name}",
-                f"Price:    ${price:.2f} {currency}",
-                f"Previous: {signal_names.get(previous_signal, 'None')}",
-            ]
-            if atr is not None:
-                message_parts.append(f"ATR:      ${atr:.2f}")
-            if signal_quality is not None:
-                message_parts.append(f"Quality:  {signal_quality:.0f}/100")
-            message_parts.append(f"\nTrade: {trade_result or 'No action'}")
-
-            message      = "\n".join(message_parts)
-            alert_results = send_all_alerts(message, ticker)
-            alerts_sent  = ", ".join(k for k, v in alert_results.items() if v)
-
-            last_signals[stock_key] = current_signal
-            save_last_signals(last_signals)
-
-            log_msg = f"[stocks] {ticker}: {previous_signal} → {current_signal}"
-            if signal_quality is not None:
-                log_msg += f" | Quality: {signal_quality:.0f}"
-            log_msg += f" | Alerts: {alerts_sent}"
-            logging.info(log_msg)
-            print(f"\n{message}\nAlerts: {alerts_sent}\n")
-
-        else:
-            logging.info(f"[stocks] {ticker}: No change (signal {current_signal})")
-
-    except Exception as e:
-        logging.error(f"[stocks] {ticker} error: {e}")
-        print(f"ERROR [stocks] {ticker}: {e}")
+    run_for_symbol(
+        ticker,
+        asset_type   = "stock",
+        fetch_fn     = lambda: fetch_stock_ohlcv(symbol=ticker, timeframe="1h", limit=500),
+        currency     = currency,
+        execute_fn   = _execute,
+        cooldown_key = f"STOCK:{ticker}",
+        field_label  = "Ticker",
+        signal_title = "STOCK SIGNAL CHANGE",
+        log_prefix   = "[stocks] ",
+        do_plot      = False,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -425,10 +443,10 @@ def check_all_positions_for_exits():
                     logging.info(f"{coin}: Stop Loss hit at ${current_price:.2f}")
                     print(f"\n[AUTO EXIT] {coin} Stop Loss hit!")
                     result = execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
-                    _stop_out_cooldown[coin] = _time.time()
+                    _cooldown.start(coin)
 
-                    # ── Log auto exit to SQLite ───────────────────────────────
-                    if result:
+                    # STOPGAP: same string-vs-dict guard as run_for_symbol.
+                    if isinstance(result, dict):
                         _trade_logger.log_trade(
                             symbol      = coin,
                             action      = "EXIT",
@@ -439,14 +457,25 @@ def check_all_positions_for_exits():
                             pnl         = result.get("pnl"),
                             exit_reason = "SL",
                         )
+                    elif result:
+                        logging.info(f"{coin}: SL exit result was a string, not a dict — logging message only")
+                        _trade_logger.log_trade(
+                            symbol      = coin,
+                            action      = "EXIT",
+                            direction   = "LONG",
+                            price       = current_price,
+                            quantity    = 0,
+                            asset_type  = "crypto",
+                            exit_reason = f"SL: {str(result)[:190]}",
+                        )
 
                 elif tp and current_price >= tp:
                     logging.info(f"{coin}: Take Profit hit at ${current_price:.2f}")
                     print(f"\n[AUTO EXIT] {coin} Take Profit hit!")
                     result = execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
 
-                    # ── Log auto exit to SQLite ───────────────────────────────
-                    if result:
+                    # STOPGAP: same string-vs-dict guard as run_for_symbol.
+                    if isinstance(result, dict):
                         _trade_logger.log_trade(
                             symbol      = coin,
                             action      = "EXIT",
@@ -457,9 +486,20 @@ def check_all_positions_for_exits():
                             pnl         = result.get("pnl"),
                             exit_reason = "TP",
                         )
+                    elif result:
+                        logging.info(f"{coin}: TP exit result was a string, not a dict — logging message only")
+                        _trade_logger.log_trade(
+                            symbol      = coin,
+                            action      = "EXIT",
+                            direction   = "LONG",
+                            price       = current_price,
+                            quantity    = 0,
+                            asset_type  = "crypto",
+                            exit_reason = f"TP: {str(result)[:190]}",
+                        )
 
             except Exception as e:
-                logging.error(f"Error checking position {coin}: {e}")
+                _handle_symbol_error(e, f"position check {coin}")
 
     except Exception as e:
         logging.error(f"Error in check_all_positions_for_exits: {e}")
@@ -506,6 +546,10 @@ def run_startup_backtest_check():
         backtester.run(df, symbol=symbol, strategy_name=f"Enhanced Strategy [{selected_mode}]")
 
         # Print summary to console — no external DB needed
+        if not POLARS_AVAILABLE:
+            print("→ polars not available on this platform — skipping backtest health check")
+            return
+
         df_trades    = pl.DataFrame(backtester.trades) if backtester.trades else pl.DataFrame()
         total_trades = df_trades.height
         if total_trades > 0:
