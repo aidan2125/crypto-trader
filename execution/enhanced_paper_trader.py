@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 import csv
 from datetime import datetime
 from utils.currencies import SUPPORTED_CURRENCIES
@@ -32,7 +33,7 @@ CSV_FILE = "logs/paper_trades.csv"
 # Default balances
 DEFAULT_BALANCES = {
     "USD": {"cash": 54.05},
-    "ZAR": {"cash": 1000.0}  # ~54 USD
+    "ZAR": {"cash": 0.0}
 }
 
 # ZAR to USD rate
@@ -41,6 +42,44 @@ ZAR_TO_USD_RATE = 1 / 18.5
 # Ensure dirs
 os.makedirs("data", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
+
+
+def _to_usd(amount, currency):
+    """Convert a native-currency amount to its USD equivalent."""
+    if currency == "ZAR":
+        return amount * ZAR_TO_USD_RATE
+    return amount  # USD (or an unrecognized currency, treated as already-USD)
+
+
+def _calculate_total_equity_usd(balances, positions):
+    """
+    Total account equity, normalized to USD, used for the daily-loss
+    circuit breaker checks.
+
+    Previously this was `account["cash"] + sum(p["trade_size"] for p in
+    positions)`: only the CURRENT TRADE's currency cash bucket (ignoring
+    every other currency's cash entirely), plus a raw sum of trade_size
+    across positions with no regard for which currency each position was
+    opened in. Since positions can be ZAR (XRP/ADA/DOT per coin_currency.py)
+    or USD (BTC/ETH/LTC), that raw sum was mixing ~18.5x-different units
+    together as if they were equal — e.g. a R500 ZAR position and a $500
+    USD position added up to "1000" of nothing meaningful. That broken
+    figure then fed directly into the max_daily_loss_pct_account /
+    max_daily_loss_pct_coin circuit breaker, so it could trip far too
+    early or far too late depending on which currency happened to be
+    involved.
+
+    This version converts every cash balance (across all currencies in
+    `balances`) and every open position's trade_size (using that
+    position's own stored "currency" field, set at entry) to USD before
+    summing, giving one consistent basis.
+    """
+    cash_usd = sum(_to_usd(bal.get("cash", 0.0), curr) for curr, bal in balances.items())
+    exposure_usd = sum(
+        _to_usd(p.get("trade_size", 0.0), p.get("currency", "USD"))
+        for p in positions.values()
+    )
+    return cash_usd + exposure_usd
 
 
 # ------------------- Utils -------------------
@@ -55,8 +94,40 @@ def load_json(file_path, default=None):
 
 
 def save_json(file_path, data):
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
+    """
+    Atomic write: build the new content in a temp file in the same
+    directory as file_path, fsync it, then os.replace() it over the
+    real path. os.replace is atomic on POSIX and Windows, so a crash
+    or kill mid-write can never leave the file half-written — it's
+    either the old complete version or the new complete version, never
+    a corrupted mix of both. This is shared by POSITIONS_FILE,
+    BALANCE_FILE, and SUMMARY_FILE, so all three get the fix.
+
+    Same directory matters: atomic rename only holds within one
+    filesystem, which is why the temp file is created next to the
+    target rather than in a system temp dir.
+    """
+    dir_name = os.path.dirname(file_path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=dir_name,
+        prefix=os.path.basename(file_path) + ".",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())  # make sure bytes hit disk before the rename
+        os.replace(tmp_path, file_path)
+    except BaseException:
+        # Clean up the temp file on any failure so it doesn't linger.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def log_trade(message):
@@ -116,7 +187,32 @@ def update_summary(coin, pnl, trade_type="MANUAL"):
 
 
 # ------------------- Execute Trade -------------------
-def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, override_risk=False, atr=None):
+def execute_paper_trade(
+    coin, signal, price, currency="USD", trade_size=None, override_risk=False,
+    atr=None, stop_loss=None, take_profit=None,
+):
+    """
+    stop_loss / take_profit: optional, absolute price levels from the
+    strategy's own signal row (enhanced_strategy()'s "stop_loss"/
+    "take_profit" columns). When provided, these are used directly —
+    they're the exact levels the strategy's R:R check and quality score
+    were evaluated against when the signal fired, and they are NOT
+    adjusted for entry slippage. Shifting them by the slippage delta
+    would silently change the trade's real reward:risk versus what the
+    strategy validated.
+
+    If not provided (e.g. no strategy SL/TP available, or an asset type
+    that hasn't been wired up to pass them yet), falls back to the old
+    behavior: SL/TP computed here from `atr` via calculate_dynamic_sl_tp(),
+    using this module's own ATR multipliers (config['atr_multiplier_sl']/
+    ['atr_multiplier_tp']) rather than the strategy's. Previously this
+    fallback path was the ONLY path — the strategy's own stop_loss/
+    take_profit columns were computed and quality-checked but never
+    actually used to open the position, so paper trades were opened at a
+    different (tighter, 2x/3x ATR default) stop distance than the one the
+    signal was validated against (3x/4.5x ATR in strict mode). Passing the
+    strategy's own levels through closes that mismatch.
+    """
     config = load_config()
     balances = load_json(BALANCE_FILE, DEFAULT_BALANCES.copy())
     positions = load_json(POSITIONS_FILE, {})
@@ -144,7 +240,7 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
                     "size_usd": None, "stop_loss": None, "take_profit": None,
                     "pnl": None, "exit_reason": None}
 
-        equity = account["cash"] + sum(p.get("trade_size", 0.0) for p in positions.values())
+        equity = _calculate_total_equity_usd(balances, positions)
         daily_pnl_account = get_daily_realized_pnl()
         daily_pnl_coin = get_daily_realized_pnl(symbol=coin)
         max_account_loss = equity * config.get("max_daily_loss_pct_account", 0.03)
@@ -170,14 +266,21 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
                         "size_usd": None, "stop_loss": None, "take_profit": None,
                         "pnl": None, "exit_reason": None}
 
-        if atr is None or atr <= 0:
-            return {"success": False, "action": "BUY", "message": "ERROR: ATR required (>0)",
+        # --- Determine stop-loss for position sizing ---
+        # Prefer the strategy's own stop_loss (absolute price level, already
+        # validated by the strategy's R:R/quality checks). Fall back to an
+        # ATR-derived estimate only if the strategy didn't supply one.
+        if stop_loss is not None:
+            approx_sl = stop_loss
+        elif atr is not None and atr > 0:
+            approx_sl, _ = calculate_dynamic_sl_tp(price, atr, "BUY", config)
+        else:
+            return {"success": False, "action": "BUY", "message": "ERROR: stop_loss or ATR required",
                     "quantity": 0, "size_usd": None, "stop_loss": None, "take_profit": None,
                     "pnl": None, "exit_reason": None}
 
-        approx_sl, _ = calculate_dynamic_sl_tp(price, atr, "BUY", config)
         calc_size = calc_position_size(account["cash"], price, approx_sl, config.get("max_loss_per_trade_pct", 0.02))
-        
+
         calc_size = trade_size or calc_size
         if calc_size <= 0:
             return {"success": False, "action": "BUY", "message": "SIZE TOO SMALL",
@@ -193,7 +296,15 @@ def execute_paper_trade(coin, signal, price, currency="USD", trade_size=None, ov
                     "pnl": None, "exit_reason": None}
 
         effective_price = price * (1 + config.get("slippage_pct", 0.0005))
-        sl, tp = calculate_dynamic_sl_tp(effective_price, atr, "BUY", config)
+
+        # --- Final SL/TP to store on the position ---
+        # Strategy-provided levels are used as-is (fixed absolute prices,
+        # not shifted by slippage — see docstring). Fallback path keeps the
+        # old behavior of deriving SL/TP from the slippage-adjusted entry.
+        if stop_loss is not None and take_profit is not None:
+            sl, tp = stop_loss, take_profit
+        else:
+            sl, tp = calculate_dynamic_sl_tp(effective_price, atr, "BUY", config)
 
         account["cash"] -= total_cost
         positions[coin] = {

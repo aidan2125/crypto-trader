@@ -19,6 +19,15 @@ New in this version:
     pullback_threshold % of ma_fast before firing, avoiding chasing
     extended moves and improving average entry price
 
+SHORTS DISABLED (strict mode only): execute_paper_trade() in
+enhanced_paper_trader.py has no code path that opens a short position —
+signal == -1 there only closes an existing long. Without this, a short
+setup in strict mode would fire, fail to execute, and still get logged
+as a phantom ENTRY SHORT with quantity 0 plus a Telegram/Discord/email
+alert. Forcing short_confirmed = False in strict mode stops that. Remove
+this override once execute_paper_trade() gets a real short-open branch
+with direction-aware SL/TP handling.
+
 Usage:
     df_out = enhanced_strategy(df, mode="balanced")
 """
@@ -420,9 +429,11 @@ def enhanced_strategy(
             long_confirmed = (
                 ma_golden_recent and macd_bullish and uptrend_list[i]
             )
-            short_confirmed = (
-                ma_death_recent and macd_bearish and downtrend_list[i]
-            )
+            # Shorts disabled in strict mode — see module docstring.
+            # execute_paper_trade() has no short-open code path yet, so a
+            # short signal here would previously fire, fail to execute,
+            # and still get logged/alerted as a phantom trade.
+            short_confirmed = False
         else:
             long_confirmed = (
                 (ma_golden and macd_bull and uptrend_list[i] and near_ma_fast_long)

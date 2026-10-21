@@ -1,5 +1,8 @@
-BASE_CURRENCY = "USD"
-REPORT_CURRENCY = "ZAR"
-
-# Hardcoded for now (we’ll automate later)
-USD_TO_ZAR = 18.50
+COIN_CURRENCY = {
+    "BTC/USDT": "USD",
+    "ETH/USDT": "USD",
+    "LTC/USDT": "USD",
+    "XRP/USDT": "USD",
+    "ADA/USDT": "USD",
+    "DOT/USDT": "USD",
+}

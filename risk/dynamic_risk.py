@@ -30,7 +30,7 @@ ENHANCED_RISK_CONFIG = {
     "trailing_stop_pct": 0.03,           # 3% trailing stop
     
     # Fees and Slippage
-    "trading_fee_pct": 0.001,
+    "trading_fee_pct": 0.004,
     "slippage_pct": 0.0005,
     
     # Portfolio Risk
@@ -195,64 +195,10 @@ def save_risk_config_backup(config: dict, path: str = RISK_CONFIG_FILE, keep_mai
         with open(path, "w") as f:
             json.dump(config, f, indent=4)
 
-def analyze_trade_risk(entry_price, stop_loss, take_profit, position_size, account_balance):
-    """
-    Analyze and display trade risk metrics.
-    
-    Args:
-        entry_price: Entry price
-        stop_loss: Stop loss price
-        take_profit: Take profit price
-        position_size: Position size in currency
-        account_balance: Total account balance
-        
-    Returns:
-        dict: Risk analysis
-    """
-    # Calculate risk and reward in dollars
-    risk_dollars = abs(entry_price - stop_loss) * (position_size / entry_price)
-    reward_dollars = abs(take_profit - entry_price) * (position_size / entry_price)
-    
-    # Calculate as percentage of account
-    risk_pct = (risk_dollars / account_balance * 100) if account_balance > 0 else 0
-    reward_pct = (reward_dollars / account_balance * 100) if account_balance > 0 else 0
-    
-    # Risk/reward ratio
-    rr_ratio = get_risk_reward_ratio(entry_price, stop_loss, take_profit)
-    
-    return {
-        'risk_dollars': risk_dollars,
-        'reward_dollars': reward_dollars,
-        'risk_pct': risk_pct,
-        'reward_pct': reward_pct,
-        'risk_reward_ratio': rr_ratio,
-        'max_loss': risk_dollars,
-        'max_profit': reward_dollars
-    }
-
-def validate_trade_risk(risk_analysis, config=None):
-    """
-    Validate if trade meets risk criteria.
-    
-    Args:
-        risk_analysis: Dict from analyze_trade_risk()
-        config: Risk configuration
-        
-    Returns:
-        tuple: (is_valid, reason)
-    """
-    if config is None:
-        config = load_enhanced_risk_config()
-    
-    # Check risk/reward ratio
-    if risk_analysis['risk_reward_ratio'] < config.get('min_risk_reward_ratio', 1.5):
-        return False, f"Risk/Reward too low ({risk_analysis['risk_reward_ratio']:.2f})"
-    
-    # Check max risk per trade
-    if risk_analysis['risk_pct'] > config.get('max_loss_per_trade_pct', 0.02) * 100:
-        return False, f"Risk too high ({risk_analysis['risk_pct']:.2f}%)"
-    
-    return True, "Trade meets risk criteria"
+# NOTE: validate_trade_risk() and analyze_trade_risk() were removed here.
+# Confirmed dead code — never called anywhere in the codebase, and they
+# were coupled (validate_trade_risk only consumed the dict analyze_trade_risk
+# produced), so there was no reason to keep one without the other.
 
 def calculate_fees_and_slippage(position_size: float, config: dict = None) -> dict:
     """

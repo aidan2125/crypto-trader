@@ -29,6 +29,20 @@ LOG = logging.getLogger(__name__)
 # ── Default DB path — override via env var ────────────────────────────────────
 DEFAULT_DB_PATH = Path(os.getenv("TRADE_DB_PATH", "data/trades.db"))
 
+# Duplicated from execution/enhanced_paper_trader.py rather than imported:
+# that module (and risk/daily_pnl.py) sit in a different part of the
+# dependency graph and importing across modules just for one constant
+# risks a cycle. TODO: same note as daily_pnl.py — centralize this in
+# something like utils/currencies.py instead of three copies.
+ZAR_TO_USD_RATE = 1 / 18.5
+
+
+def _to_usd(amount, currency):
+    """Convert a native-currency amount to its USD equivalent."""
+    if currency == "ZAR":
+        return amount * ZAR_TO_USD_RATE
+    return amount  # USD (or an unrecognized currency, treated as already-USD)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schema
@@ -38,7 +52,7 @@ SCHEMA = """
 -- Every executed trade (entry + exit)
 CREATE TABLE IF NOT EXISTS trades (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts              TEXT    NOT NULL,               -- ISO-8601 UTC
+    ts              TEXT    NOT NULL,               -- ISO-8601 UTC (no trailing Z — see _now())
     symbol          TEXT    NOT NULL,               -- e.g. BTC/USDT or AAPL
     asset_type      TEXT    NOT NULL DEFAULT 'crypto', -- 'crypto' | 'stock'
     direction       TEXT    NOT NULL,               -- 'LONG' | 'SHORT'
@@ -157,7 +171,9 @@ class TradeLogger:
 
     @staticmethod
     def _now() -> str:
-        return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        # No trailing "Z" — kept as a plain ISO string so date/prefix matching
+        # below doesn't depend on the SQLite version's date() parser.
+        return datetime.utcnow().isoformat(timespec="seconds")
 
     # ── Run session ───────────────────────────────────────────────────────────
 
@@ -372,22 +388,39 @@ class TradeLogger:
 
     def get_open_positions_summary(self) -> dict:
         """
-        Return count + total cost basis of open positions from the DB.
-        (Complements your existing positions.json.)
+        Return count + total cost basis (USD-equivalent) of open positions.
+
+        Reads data/positions.json directly rather than reconstructing this
+        from the trades table. The trades-table version had a bug: once a
+        symbol had ever been closed (any EXIT row, ever), it was permanently
+        excluded from "open" going forward — even while a brand-new position
+        in that same symbol was genuinely open. positions.json is already
+        the bot's real source of truth for what's open, so this reads that
+        instead of recomputing (and incorrectly) from trade history.
+
+        cost_basis is normalized to USD using each position's own stored
+        "currency" field (set at entry in execute_paper_trade — the same
+        field execution/enhanced_paper_trader.py's equity calc now uses).
+        Previously this summed `trade_size` across all positions with no
+        conversion, so a ZAR position and a USD position were added as if
+        they were the same unit — same bug class as the daily-loss circuit
+        breaker (execution/enhanced_paper_trader.py) and the account-wide
+        realized-PnL sum (risk/daily_pnl.py), just showing up here as a
+        third symptom rather than a separate bug.
         """
-        with self._conn() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS cnt,
-                       SUM(price * quantity) AS cost_basis
-                FROM   trades
-                WHERE  action = 'ENTRY'
-                  AND  symbol NOT IN (
-                      SELECT symbol FROM trades WHERE action='EXIT'
-                  )
-                """
-            ).fetchone()
-        return {"count": row["cnt"] or 0, "cost_basis": row["cost_basis"] or 0.0}
+        positions_path = Path("data/positions.json")
+        if not positions_path.exists():
+            return {"count": 0, "cost_basis": 0.0}
+        try:
+            positions = json.loads(positions_path.read_text())
+        except json.JSONDecodeError:
+            LOG.warning("positions.json failed to parse — reporting 0 open positions")
+            return {"count": 0, "cost_basis": 0.0}
+        cost_basis = sum(
+            _to_usd(p.get("trade_size", 0.0), p.get("currency", "USD"))
+            for p in positions.values()
+        )
+        return {"count": len(positions), "cost_basis": cost_basis}
 
     def get_last_heartbeat(self) -> Optional[dict]:
         with self._conn() as conn:
@@ -408,26 +441,42 @@ class TradeLogger:
         Returns a dict with keys:
             total_trades, wins, losses, gross_pnl, win_rate,
             profit_factor, best_trade_pnl, worst_trade_pnl
+
+        The cache is only trusted for PAST dates. Today's summary is always
+        recomputed, otherwise a 9am /status call would cache today's numbers
+        and a 2pm trade would never show up until the next day.
+
+        NOTE (not fixed here): gross_pnl / best_trade_pnl / worst_trade_pnl
+        sum and compare raw `pnl` values across all symbols with no currency
+        conversion — the same mixed-currency issue as get_open_positions_summary
+        above and risk/daily_pnl.py's account-wide sum, just not yet patched
+        in this method. Flagging rather than fixing silently, since this
+        touches the cached daily_summary table's schema/semantics and is
+        worth a deliberate look rather than a drive-by edit.
         """
-        target = (for_date or date.today()).isoformat()
+        target_date = for_date or date.today()
+        target = target_date.isoformat()
+        is_today = target_date == date.today()
 
         with self._conn() as conn:
-            # Try cache first
             cached = conn.execute(
                 "SELECT * FROM daily_summary WHERE summary_date=? AND asset_type=?",
                 (target, asset_type)
             ).fetchone()
-            if cached:
+            if cached and not is_today:
                 return dict(cached)
 
-            # Compute fresh
+            # Compute fresh. Match by ts prefix rather than SQLite's date()
+            # function — date() only parses a trailing "Z" on SQLite >= 3.42,
+            # and _now() no longer writes one anyway, so this works
+            # regardless of which SQLite this ever runs against.
             q = """
                 SELECT pnl FROM trades
                 WHERE  action='EXIT'
-                  AND  date(ts) = ?
+                  AND  ts LIKE ?
                   AND  pnl IS NOT NULL
             """
-            params: list = [target]
+            params: list = [target + "%"]
             if asset_type != "all":
                 q += " AND asset_type=?"
                 params.append(asset_type)

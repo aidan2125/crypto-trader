@@ -70,6 +70,9 @@ class BacktestPro:
         self.trades = []
         self.position = None
         self.risk_config = risk_config or {}
+        self.fee_pct = self.risk_config.get("trading_fee_pct", 0.001)
+        self.slip_pct = self.risk_config.get("slippage_pct", 0.0005)
+        self._entry_fee = 0.0
 
     def run(
         self,
@@ -164,7 +167,7 @@ class BacktestPro:
         sl_idx: int,
         tp_idx: int,
     ):
-        entry_price = price * (1.0005 if signal == 1 else 0.9995)  # 0.05% slippage
+        entry_price = price * ((1 + self.slip_pct) if signal == 1 else (1 - self.slip_pct))
 
         # ── Read SL/TP from strategy dataframe (primary source) ───────────────
         # The strategy already computed these using _MODE_CONFIG multipliers.
@@ -233,7 +236,7 @@ class BacktestPro:
         if size_usd < 50:
             return
 
-        size_usd *= 0.999  # entry fee
+        self._entry_fee = size_usd * self.fee_pct  # charged at close
 
         self.position = {
             "side":     "long" if signal == 1 else "short",
@@ -255,7 +258,7 @@ class BacktestPro:
 
     def _check_exit(self, row: tuple, price: float):
         pos = self.position
-        exit_price = price * (0.9995 if pos["side"] == "long" else 1.0005)
+        exit_price = price * ((1 - self.slip_pct) if pos["side"] == "long" else (1 + self.slip_pct))
 
         hit_sl = (pos["side"] == "long"  and price <= pos["sl"]) or (
                   pos["side"] == "short" and price >= pos["sl"])
@@ -271,7 +274,8 @@ class BacktestPro:
         if pos["side"] == "short":
             pnl_raw = -pnl_raw
 
-        pnl     = pnl_raw * 0.999  # exit fee
+        exit_fee = (pos["size_usd"] + pnl_raw) * self.fee_pct
+        pnl     = pnl_raw - exit_fee - self._entry_fee
         pnl_pct = pnl / pos["size_usd"] * 100 if pos["size_usd"] != 0 else 0
 
         self.balance += pos["size_usd"] + pnl

@@ -47,6 +47,7 @@ from alerts.email_alerts import send_email
 from alerts.discord_alerts import send_discord_message
 from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
+from execution.altcoin_trader import check_altcointrader_positions_for_exits
 from backtest.run_backtest_simple import BacktestPro
 from risk.dynamic_risk import load_enhanced_risk_config as load_config
 
@@ -199,7 +200,10 @@ def run_for_symbol(
     asset_type: str,                       # "crypto" | "stock"
     fetch_fn: Callable[[], object],         # zero-arg callable -> df
     currency: str,
-    execute_fn: Callable[[str, int, float, str, Optional[float]], dict],
+    execute_fn: Callable[
+        [str, int, float, str, Optional[float], Optional[float], Optional[float]],
+        dict,
+    ],
     cooldown_key: str,
     field_label: str,                      # "Coin" or "Ticker"
     signal_title: str,                      # "SIGNAL CHANGE" / "STOCK SIGNAL CHANGE"
@@ -233,6 +237,21 @@ def run_for_symbol(
         if "atr" in last_row.columns and last_row["atr"][0] is not None:
             atr = float(last_row["atr"][0])
 
+        # Strategy-computed SL/TP for this signal row, if any. Populated by
+        # enhanced_strategy() only on a qualifying entry (enter_long/
+        # enter_short); None on HOLD rows. Passed through to execute_fn so
+        # the position is opened at the exact levels the strategy's R:R
+        # check and quality score were evaluated against, instead of a
+        # different ATR-multiplier-based estimate computed independently
+        # inside execute_paper_trade.
+        stop_loss = None
+        if "stop_loss" in last_row.columns and last_row["stop_loss"][0] is not None:
+            stop_loss = float(last_row["stop_loss"][0])
+
+        take_profit = None
+        if "take_profit" in last_row.columns and last_row["take_profit"][0] is not None:
+            take_profit = float(last_row["take_profit"][0])
+
         signal_quality = None
         if "signal_quality" in last_row.columns and last_row["signal_quality"][0] is not None:
             signal_quality = float(last_row["signal_quality"][0])
@@ -254,7 +273,7 @@ def run_for_symbol(
 
         trade_result = None
         if current_signal != previous_signal:
-            trade_result = execute_fn(symbol, current_signal, price, currency, atr)
+            trade_result = execute_fn(symbol, current_signal, price, currency, atr, stop_loss, take_profit)
 
             # ── Stop-loss cooldown ────────────────────────────────────────────
             _exit_reason = trade_result.get("exit_reason") if isinstance(trade_result, dict) else None
@@ -377,8 +396,11 @@ def run_for_coin(coin: str) -> None:
     currency  = COIN_CURRENCY.get(coin, DEFAULT_CURRENCY)
     timeframe = "4h" if any(x in coin for x in ["BTC", "ETH"]) else "1h"
 
-    def _execute(symbol, signal, price, currency, atr):
-        return execute_paper_trade(coin=symbol, signal=signal, price=price, currency=currency, atr=atr)
+    def _execute(symbol, signal, price, currency, atr, stop_loss, take_profit):
+        return execute_paper_trade(
+            coin=symbol, signal=signal, price=price, currency=currency,
+            atr=atr, stop_loss=stop_loss, take_profit=take_profit,
+        )
 
     run_for_symbol(
         coin,
@@ -397,7 +419,11 @@ def run_for_coin(coin: str) -> None:
 def run_for_stock(ticker: str, risk_config: dict | None = None) -> None:
     currency = STOCK_CURRENCY.get(ticker, "USD")
 
-    def _execute(symbol, signal, price, currency, atr):
+    def _execute(symbol, signal, price, currency, atr, stop_loss, take_profit):
+        # execute_stock_trade doesn't yet accept strategy-provided SL/TP —
+        # stop_loss/take_profit are accepted here and ignored so this
+        # adapter matches run_for_symbol's execute_fn signature without
+        # changing execute_stock_trade's own behavior.
         return execute_stock_trade(
             ticker=symbol, signal=signal, price=price, currency=currency,
             atr=atr, risk_config=risk_config,
@@ -422,87 +448,130 @@ def run_for_stock(ticker: str, risk_config: dict | None = None) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def check_all_positions_for_exits():
+    """
+    NOTE on error handling: only the setup step (importing the paper-trader
+    helpers and loading positions.json) is wrapped in its own try/except
+    here. The per-coin loop below is deliberately NOT wrapped in a second,
+    outer try/except Exception.
+
+    Previously the entire function body — setup AND the per-coin loop —
+    was wrapped in one outer try/except Exception that just logged and
+    returned. The per-coin loop already has its own try/except that calls
+    _handle_symbol_error(), which is designed to re-raise FATAL errors
+    (auth failures, disk I/O errors, etc.) so the bot crashes loudly
+    instead of silently retrying forever — see FATAL_ERROR_MARKERS above.
+    But that re-raised exception then hit the outer try/except here, which
+    caught it, logged it as an ordinary error, and returned as if nothing
+    fatal had happened. That silently defeated the fatal-error escalation
+    for every exit check, while run_for_symbol() (which has no such
+    double-wrapping) correctly let the same class of error crash the bot.
+    Removing the outer catch-all restores that behavior here too: a fatal
+    error while checking exits now propagates out of this function and up
+    through main()'s loop, same as everywhere else.
+    """
+    from execution.enhanced_paper_trader import load_json, POSITIONS_FILE
+
     try:
-        from execution.enhanced_paper_trader import load_json, POSITIONS_FILE
         positions = load_json(POSITIONS_FILE, {})
-        if not positions:
-            return
-
-        for coin, position in list(positions.items()):
-            try:
-                df = fetch_ohlcv(symbol=coin, limit=1)
-                if df is None or df.is_empty():
-                    continue
-
-                current_price = float(df["close"][0])
-                sl            = position.get("stop_loss")
-                tp            = position.get("take_profit")
-                currency      = position.get("currency", DEFAULT_CURRENCY)
-
-                if sl and current_price <= sl:
-                    logging.info(f"{coin}: Stop Loss hit at ${current_price:.2f}")
-                    print(f"\n[AUTO EXIT] {coin} Stop Loss hit!")
-                    result = execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
-                    _cooldown.start(coin)
-
-                    # STOPGAP: same string-vs-dict guard as run_for_symbol.
-                    if isinstance(result, dict):
-                        _trade_logger.log_trade(
-                            symbol      = coin,
-                            action      = "EXIT",
-                            direction   = "LONG",   # exiting a long position
-                            price       = current_price,
-                            quantity    = result.get("quantity", 0),
-                            asset_type  = "crypto",
-                            pnl         = result.get("pnl"),
-                            exit_reason = "SL",
-                        )
-                    elif result:
-                        logging.info(f"{coin}: SL exit result was a string, not a dict — logging message only")
-                        _trade_logger.log_trade(
-                            symbol      = coin,
-                            action      = "EXIT",
-                            direction   = "LONG",
-                            price       = current_price,
-                            quantity    = 0,
-                            asset_type  = "crypto",
-                            exit_reason = f"SL: {str(result)[:190]}",
-                        )
-
-                elif tp and current_price >= tp:
-                    logging.info(f"{coin}: Take Profit hit at ${current_price:.2f}")
-                    print(f"\n[AUTO EXIT] {coin} Take Profit hit!")
-                    result = execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
-
-                    # STOPGAP: same string-vs-dict guard as run_for_symbol.
-                    if isinstance(result, dict):
-                        _trade_logger.log_trade(
-                            symbol      = coin,
-                            action      = "EXIT",
-                            direction   = "LONG",
-                            price       = current_price,
-                            quantity    = result.get("quantity", 0),
-                            asset_type  = "crypto",
-                            pnl         = result.get("pnl"),
-                            exit_reason = "TP",
-                        )
-                    elif result:
-                        logging.info(f"{coin}: TP exit result was a string, not a dict — logging message only")
-                        _trade_logger.log_trade(
-                            symbol      = coin,
-                            action      = "EXIT",
-                            direction   = "LONG",
-                            price       = current_price,
-                            quantity    = 0,
-                            asset_type  = "crypto",
-                            exit_reason = f"TP: {str(result)[:190]}",
-                        )
-
-            except Exception as e:
-                _handle_symbol_error(e, f"position check {coin}")
-
     except Exception as e:
-        logging.error(f"Error in check_all_positions_for_exits: {e}")
+        # Only failure to even load positions.json is treated as
+        # non-fatal-and-skip-this-cycle; anything raised from inside the
+        # per-coin loop below is handled (and possibly re-raised) by
+        # _handle_symbol_error instead.
+        logging.error(f"Error in check_all_positions_for_exits: could not load positions: {e}")
+        return
+
+    if not positions:
+        return
+
+    for coin, position in list(positions.items()):
+        try:
+            df = fetch_ohlcv(symbol=coin, limit=1)
+            if df is None or df.is_empty():
+                continue
+
+            current_price = float(df["close"][0])
+            sl            = position.get("stop_loss")
+            tp            = position.get("take_profit")
+            currency      = position.get("currency", DEFAULT_CURRENCY)
+
+            if sl and current_price <= sl:
+                logging.info(f"{coin}: Stop Loss hit at ${current_price:.2f}")
+                print(f"\n[AUTO EXIT] {coin} Stop Loss hit!")
+                result = execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
+                _cooldown.start(coin)
+
+                # STOPGAP: same string-vs-dict guard as run_for_symbol.
+                if isinstance(result, dict):
+                    _trade_logger.log_trade(
+                        symbol      = coin,
+                        action      = "EXIT",
+                        direction   = "LONG",   # exiting a long position
+                        price       = current_price,
+                        quantity    = result.get("quantity", 0),
+                        asset_type  = "crypto",
+                        pnl         = result.get("pnl"),
+                        exit_reason = "SL",
+                    )
+                elif result:
+                    logging.info(f"{coin}: SL exit result was a string, not a dict — logging message only")
+                    _trade_logger.log_trade(
+                        symbol      = coin,
+                        action      = "EXIT",
+                        direction   = "LONG",
+                        price       = current_price,
+                        quantity    = 0,
+                        asset_type  = "crypto",
+                        exit_reason = f"SL: {str(result)[:190]}",
+                    )
+
+            elif tp and current_price >= tp:
+                logging.info(f"{coin}: Take Profit hit at ${current_price:.2f}")
+                print(f"\n[AUTO EXIT] {coin} Take Profit hit!")
+                result = execute_paper_trade(coin, -1, current_price, currency, override_risk=True)
+
+                # STOPGAP: same string-vs-dict guard as run_for_symbol.
+                if isinstance(result, dict):
+                    _trade_logger.log_trade(
+                        symbol      = coin,
+                        action      = "EXIT",
+                        direction   = "LONG",
+                        price       = current_price,
+                        quantity    = result.get("quantity", 0),
+                        asset_type  = "crypto",
+                        pnl         = result.get("pnl"),
+                        exit_reason = "TP",
+                    )
+                elif result:
+                    logging.info(f"{coin}: TP exit result was a string, not a dict — logging message only")
+                    _trade_logger.log_trade(
+                        symbol      = coin,
+                        action      = "EXIT",
+                        direction   = "LONG",
+                        price       = current_price,
+                        quantity    = 0,
+                        asset_type  = "crypto",
+                        exit_reason = f"TP: {str(result)[:190]}",
+                    )
+
+        except Exception as e:
+            _handle_symbol_error(e, f"position check {coin}")
+
+
+def check_altcoin_exits():
+    events = check_altcointrader_positions_for_exits(fetch_ohlcv)
+    for ev in events:
+        if ev["kind"] in ("SL", "TP"):
+            msg = (f"[ALTCOIN LIVE] {ev['coin']} {ev['kind']} triggered at "
+                   f"{ev['price']} USDT\n{ev['result'].get('message')}")
+            logging.warning(msg)
+            send_all_alerts(msg, ev["coin"])
+        elif ev["kind"] == "NO_PRICE":
+            logging.error(f"[ALTCOIN LIVE] no price for {ev['coin']} — stop not checked this cycle")
+    for ev in events:  # errors last, so completed exits are alerted before a fatal raise
+        if ev["kind"] == "ERROR":
+            send_all_alerts(f"[ALTCOIN LIVE] exit check failed for {ev['coin']}: {ev['exc']}", ev["coin"])
+            _handle_symbol_error(ev["exc"], f"altcoin exit {ev['coin']}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -592,84 +661,95 @@ def main(continuous: bool = False, interval: int = 300):
     print(f"  Max Positions:  {config.get('max_positions', 5)}")
     print(f"  Max Risk/Trade: {config.get('max_loss_per_trade_pct', 0.02)*100:.1f}%")
     print(f"  ATR SL: {config.get('atr_multiplier_sl', 2.0)}× | TP: {config.get('atr_multiplier_tp', 3.0)}×")
+    print(f"  (Fallback only — crypto entries now use the strategy's own")
+    print(f"   stop_loss/take_profit when available; see run_for_symbol.)")
 
-    while True:
-        run_count += 1
+    # Wrapped in try/finally so _trade_logger.end_run() always fires —
+    # including on Ctrl-C (KeyboardInterrupt) or any uncaught exception —
+    # rather than only after a normal `break`. Previously an interrupt or
+    # crash left that run's row in the `runs` table with ended_at=NULL
+    # forever, since end_run() was only reachable by falling out the
+    # bottom of the while loop normally.
+    try:
+        while True:
+            run_count += 1
 
-        # ── Heartbeat — Telegram bot reads this for /status ───────────────────
-        _trade_logger.write_heartbeat(loop_count=run_count)
-
-        print(f"\n{'='*70}")
-        print(f"RUN #{run_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | MODE: {TRADING_MODE.upper()}".center(70))
-        print(f"{'='*70}\n")
-
-        # ── Pause check — honours /pause from Telegram bot ────────────────────
-        from pathlib import Path
-        import json as _json
-        pause_file = Path("data/pause_state.json")
-        if pause_file.exists():
-            try:
-                with open(pause_file) as _f:
-                    _ps = _json.load(_f)
-                if _ps.get("paused"):
-                    print("  [PAUSED] Trading paused via Telegram — skipping this cycle")
-                    logging.info(f"Run #{run_count} skipped — bot is paused")
-                    if not continuous:
-                        break
-                    print(f"  Next check in {interval} seconds...")
-                    time.sleep(interval)
-                    continue
-            except Exception:
-                pass
-
-        # ── CRYPTO LOOP ───────────────────────────────────────────────────────
-        if TRADING_MODE in ("crypto", "dual"):
-            print("── CRYPTO ──────────────────────────────────────────────────")
-            for coin in COIN_CURRENCY:
-                print(f"→ {coin}")
-                run_for_coin(coin)
-                time.sleep(1)
-
-            print("\n→ Checking crypto positions for exits...")
-            check_all_positions_for_exits()
+            # ── Heartbeat — Telegram bot reads this for /status ───────────────────
+            _trade_logger.write_heartbeat(loop_count=run_count)
 
             print(f"\n{'='*70}")
-            summarize_paper_trades()
+            print(f"RUN #{run_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | MODE: {TRADING_MODE.upper()}".center(70))
             print(f"{'='*70}\n")
 
-        # ── STOCK LOOP ────────────────────────────────────────────────────────
-        if TRADING_MODE in ("stocks", "dual"):
-            print("── STOCKS ──────────────────────────────────────────────────")
+            # ── Pause check — honours /pause from Telegram bot ────────────────────
+            from pathlib import Path
+            import json as _json
+            pause_file = Path("data/pause_state.json")
+            if pause_file.exists():
+                try:
+                    with open(pause_file) as _f:
+                        _ps = _json.load(_f)
+                    if _ps.get("paused"):
+                        print("  [PAUSED] Trading paused via Telegram — skipping this cycle")
+                        logging.info(f"Run #{run_count} skipped — bot is paused")
+                        if not continuous:
+                            break
+                        print(f"  Next check in {interval} seconds...")
+                        time.sleep(interval)
+                        continue
+                except Exception:
+                    pass
 
-            if is_market_open():
-                print("  Market is OPEN — running stock signals\n")
-                for ticker in STOCK_WATCHLIST:
-                    print(f"→ {ticker}")
-                    run_for_stock(ticker, risk_config=config)
+            # ── CRYPTO LOOP ───────────────────────────────────────────────────────
+            if TRADING_MODE in ("crypto", "dual"):
+                print("── CRYPTO ──────────────────────────────────────────────────")
+                check_altcoin_exits()
+
+                for coin in COIN_CURRENCY:
+                    print(f"→ {coin}")
+                    run_for_coin(coin)
                     time.sleep(1)
 
-                print("\n→ Checking stock positions for exits...")
-                check_stock_positions_for_exits(fetch_stock_ohlcv)
+                print("\n→ Checking crypto positions for exits...")
+                check_all_positions_for_exits()
 
                 print(f"\n{'='*70}")
-                summarize_stock_trades()
+                summarize_paper_trades()
                 print(f"{'='*70}\n")
 
-            else:
-                secs  = time_until_open()
-                hours = secs // 3600
-                mins  = (secs % 3600) // 60
-                print(f"  Market is CLOSED — next open in {hours}h {mins}m")
-                print("  Skipping stock signals\n")
+            # ── STOCK LOOP ────────────────────────────────────────────────────────
+            if TRADING_MODE in ("stocks", "dual"):
+                print("── STOCKS ──────────────────────────────────────────────────")
 
-        if not continuous:
-            break
+                if is_market_open():
+                    print("  Market is OPEN — running stock signals\n")
+                    for ticker in STOCK_WATCHLIST:
+                        print(f"→ {ticker}")
+                        run_for_stock(ticker, risk_config=config)
+                        time.sleep(1)
 
-        print(f"Next run in {interval} seconds...")
-        time.sleep(interval)
+                    print("\n→ Checking stock positions for exits...")
+                    check_stock_positions_for_exits(fetch_stock_ohlcv)
 
-    # ── Clean shutdown ────────────────────────────────────────────────────────
-    _trade_logger.end_run(run_count=run_count)
+                    print(f"\n{'='*70}")
+                    summarize_stock_trades()
+                    print(f"{'='*70}\n")
+
+                else:
+                    secs  = time_until_open()
+                    hours = secs // 3600
+                    mins  = (secs % 3600) // 60
+                    print(f"  Market is CLOSED — next open in {hours}h {mins}m")
+                    print("  Skipping stock signals\n")
+
+            if not continuous:
+                break
+
+            print(f"Next run in {interval} seconds...")
+            time.sleep(interval)
+    finally:
+        # ── Clean shutdown — always runs, even on Ctrl-C or a crash ──────────────
+        _trade_logger.end_run(run_count=run_count)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
