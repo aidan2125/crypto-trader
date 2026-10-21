@@ -52,3 +52,5 @@ crypto_trader.egg-info/
 data/heartbeat.json
 data/trades.db
 reports/*.png
+logs/
+data/paper_balance.json
