@@ -1,5 +1,5 @@
 # requirements.txt  —  Clean, deduplicated, ARM-compatible versions
-# Last reviewed: 2026-05
+# Last reviewed: 2026-10
 #
 # To install:  pip install -r requirements.txt
 #
@@ -9,9 +9,13 @@
 # ── Core exchange library ─────────────────────────────────────────────────────
 ccxt==4.5.28
 
+# ── Stock trading / market data (Alpaca) ─────────────────────────────────────
+alpaca-py
+
 # ── Data processing (ARM-safe) ───────────────────────────────────────────────
 pandas==2.2.2
 numpy==1.26.4
+pyarrow<18   # pyarrow 18+ requires NumPy 2.x; we are pinned to numpy 1.26.4
 
 # ── HTTP / networking ────────────────────────────────────────────────────────
 requests==2.32.3
@@ -33,7 +37,7 @@ cryptography==42.0.8
 # supabase==2.0.0   # Uncomment if using Supabase
 
 # ── Optional: polars (DO NOT USE on Android — use pandas instead) ────────────
- polars==0.20.31   # x86/VPS only
+polars==0.20.31   # x86/VPS only
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.2.2
