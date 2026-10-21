@@ -611,7 +611,7 @@ def run_startup_backtest_check():
         df = enhanced_strategy(df.clone(), mode=selected_mode)
 
         print("Running backtest simulation...")
-        backtester = BacktestPro(initial_balance=10000, risk_config=config)
+        backtester = BacktestPro(initial_balance=150, risk_config=config)
         backtester.run(df, symbol=symbol, strategy_name=f"Enhanced Strategy [{selected_mode}]")
 
         # Print summary to console — no external DB needed

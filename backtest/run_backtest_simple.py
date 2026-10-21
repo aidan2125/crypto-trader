@@ -63,7 +63,7 @@ def load_risk_config():
 # Backtest engine
 # ────────────────────────────────────────────────
 class BacktestPro:
-    def __init__(self, initial_balance=10000, risk_config=None):
+    def __init__(self, initial_balance=150, risk_config=None):
         self.initial_balance = float(initial_balance)
         self.balance = float(initial_balance)
         self.equity = []
@@ -387,7 +387,7 @@ if __name__ == "__main__":
        
         
 
-        backtester = BacktestPro(initial_balance=10000, risk_config=risk_config)
+        backtester = BacktestPro(initial_balance=150, risk_config=risk_config)
         backtester.run(
             df_final,
             symbol=args.symbol,
