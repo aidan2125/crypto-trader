@@ -54,3 +54,11 @@ data/trades.db
 reports/*.png
 logs/
 data/paper_balance.json
+logs/
+.env
+data/*.json
+!data/risk_config.json
+!data/risk_config.json
+data/history/
+reports/*.csv
+reports/status.html
