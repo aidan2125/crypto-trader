@@ -62,3 +62,6 @@ data/*.json
 data/history/
 reports/*.csv
 reports/status.html
+.coverage
+*.bak*
+*.pre_*

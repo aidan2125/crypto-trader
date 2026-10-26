@@ -2,30 +2,40 @@ name: Python tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5  # Updated to v5 for better caching
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # Pin to a stable version (or '3.12')
+          python-version: '3.12'
           cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # If you don't have requirements.txt yet, fall back to manual:
-          # pip install pytest pytest-cov python-dotenv supabase requests
+          pip install pytest pytest-cov
+
+      - name: Prepare folders
+        run: mkdir -p data logs reports
+
+      - name: DB smoke check
+        run: python db_smoke_check.py
 
       - name: Run tests with coverage
         run: pytest --cov=. --cov-report=term-missing
