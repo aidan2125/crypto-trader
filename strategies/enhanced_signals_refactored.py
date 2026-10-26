@@ -520,7 +520,7 @@ def enhanced_strategy(
                     sl = c - cfg["atr_sl_mult"] * atr_val
                     tp = c + cfg["atr_tp_mult"] * atr_val
                     rr = (tp - c) / (c - sl) if (c - sl) > 0 else 0.0
-                    if rr < min_rr:
+                    if rr < min_rr - 1e-9:
                         trade_reason_list[i] = f"LOW_RR({rr:.2f})"
                         trade_ready_list[i]  = False
                     else:
@@ -550,7 +550,7 @@ def enhanced_strategy(
                     sl = c + cfg["atr_sl_mult"] * atr_val
                     tp = c - cfg["atr_tp_mult"] * atr_val
                     rr = (c - tp) / (sl - c) if (sl - c) > 0 else 0.0
-                    if rr < min_rr:
+                    if rr < min_rr - 1e-9:
                         trade_reason_list[i] = f"LOW_RR({rr:.2f})"
                         trade_ready_list[i]  = False
                     else:

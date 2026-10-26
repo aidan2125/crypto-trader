@@ -280,6 +280,7 @@ def execute_paper_trade(
                     "pnl": None, "exit_reason": None}
 
         calc_size = calc_position_size(account["cash"], price, approx_sl, config.get("max_loss_per_trade_pct", 0.02))
+        calc_size = min(calc_size, account["cash"] * 0.995)  # tight stops: cap at cash instead of INSUFFICIENT FUNDS
 
         calc_size = trade_size or calc_size
         if calc_size <= 0:

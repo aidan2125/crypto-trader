@@ -161,6 +161,8 @@ def fetch_ohlcv(
         df = df.sort("timestamp")
 
         print(f"Pagination fetch complete: requested={limit}, received={df.height}")
+        last = df.tail(1).to_dicts()[0]
+        print(f"  [data] {symbol}: last_row={last}")
         logger.info(f"Successfully fetched {df.height} candles for {symbol}")
         return df
 
@@ -309,6 +311,8 @@ def fetch_stock_ohlcv(
 
         logger.info(f"[stocks] Fetched {df.height} bars for {symbol} ({timeframe})")
         print(f"[stocks] {symbol}: {df.height} bars fetched")
+        last = df.tail(1).to_dicts()[0]
+        print(f"  [data] {symbol}: last_row={last}")
         return df
 
     except Exception as e:
