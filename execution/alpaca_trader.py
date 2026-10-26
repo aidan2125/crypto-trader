@@ -472,11 +472,14 @@ def check_stock_positions_for_exits(fetch_fn) -> None:
 
     for ticker, position in list(positions.items()):
         try:
-            df = fetch_fn(symbol=ticker, timeframe="5m", limit=1)
+            # limit=12 -> 1h lookback; a 1-bar/5-min window is often empty on IEX
+            df = fetch_fn(symbol=ticker, timeframe="5m", limit=12)
             if df is None or df.is_empty():
+                logging.error(f"[alpaca_trader] {ticker}: no price available - SL/TP NOT checked this cycle")
+                print(f"  [WARN] {ticker}: no price data - stop/target not checked this cycle")
                 continue
 
-            current_price = float(df["close"][0])
+            current_price = float(df.tail(1)["close"][0])
             sl = position.get("stop_loss")
             tp = position.get("take_profit")
             currency = position.get("currency", "USD")
