@@ -495,4 +495,5 @@ def check_stock_positions_for_exits(fetch_fn) -> None:
                 execute_stock_trade(ticker, -1, current_price, currency, override_risk=True)
 
         except Exception as e:
-            logging.error(f"[alpaca_trader] Position check failed for {ticker}: {e}")
+            from utils.fatal_errors import handle_symbol_error
+            handle_symbol_error(e, f"[alpaca_trader] position check {ticker}")

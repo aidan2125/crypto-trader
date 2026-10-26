@@ -121,34 +121,11 @@ _cooldown = CooldownTracker(COOLDOWN_SECONDS)
 # might not match your installed library versions. Extend FATAL_MARKERS
 # as you hit real cases.
 # ─────────────────────────────────────────────────────────────────────────────
-FATAL_ERROR_MARKERS = (
-    "authenticat",       # authentication / authenticated
-    "unauthorized",
-    "invalid api key",
-    "invalid api-key",
-    "permission denied",
-    "403",
-    "401",
-    "database disk image is malformed",
-    "disk i/o error",
-    "no space left on device",
+from utils.fatal_errors import (
+    FATAL_ERROR_MARKERS,
+    is_fatal as _is_fatal,
+    handle_symbol_error as _handle_symbol_error,
 )
-
-
-def _is_fatal(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return any(marker in msg for marker in FATAL_ERROR_MARKERS)
-
-
-def _handle_symbol_error(exc: Exception, label: str) -> None:
-    """Log-and-continue for ordinary errors; re-raise for the fatal set
-    so the run loop / systemd sees it instead of silently retrying forever."""
-    if _is_fatal(exc):
-        logging.critical(f"{label}: FATAL error, stopping bot: {exc}")
-        print(f"FATAL {label}: {exc} — bot is stopping, this needs attention")
-        raise exc
-    logging.error(f"{label}: {exc}")
-    print(f"ERROR {label}: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
