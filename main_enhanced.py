@@ -229,9 +229,10 @@ def run_for_symbol(
             except Exception as e:
                 logging.error(f"{symbol}: Plot error: {e}")
 
-        last_row       = df.tail(1)
+        live_row = df.tail(1)
+        last_row = df.tail(2).head(1) if df.height >= 2 else live_row  # last closed candle
         current_signal = int(last_row["signal"][0])   if "signal" in last_row.columns else 0
-        price          = float(last_row["close"][0])  if "close"  in last_row.columns else 0.0
+        price          = float(live_row["close"][0])  if "close"  in last_row.columns else 0.0
 
         atr = None
         if "atr" in last_row.columns and last_row["atr"][0] is not None:
@@ -274,6 +275,11 @@ def run_for_symbol(
         trade_result = None
         if current_signal != previous_signal:
             trade_result = execute_fn(symbol, current_signal, price, currency, atr, stop_loss, take_profit)
+            print(f"  [trade] {symbol} sig={current_signal} -> {trade_result}")
+            if asset_type == "crypto" and isinstance(trade_result, dict) and not trade_result.get("quantity"):
+                print(f"  [skip] {symbol}: {trade_result.get('message', 'no action')}")
+                logging.info(f"{log_prefix}{symbol}: no trade executed ({trade_result.get('message')})")
+                trade_result = None
 
             # ── Stop-loss cooldown ────────────────────────────────────────────
             _exit_reason = trade_result.get("exit_reason") if isinstance(trade_result, dict) else None
@@ -381,6 +387,9 @@ def run_for_symbol(
 
         else:
             logging.info(f"{log_prefix}{symbol}: No change (signal {current_signal})")
+            _why = next((last_row[col][0] for col in last_row.columns if "reason" in col), None)
+            print(f"  [hold] {symbol}: why={_why} signal={current_signal} unchanged (prev={previous_signal}) "
+                  f"quality={signal_quality} sl={stop_loss} tp={take_profit} price={price}")
 
     except Exception as e:
         _handle_symbol_error(e, f"{log_prefix}{symbol}")
@@ -649,6 +658,14 @@ def run_startup_backtest_check():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main(continuous: bool = False, interval: int = 300):
+    # ── Startup health check — FAIL blocks startup, WARN does not ─────────────
+    import health_check
+    _hc = health_check.run_checks(health_check.build_checks(TRADING_MODE))
+    health_check.print_report(_hc)
+    if not health_check.startup_ok(_hc):
+        logging.critical("Startup health check failed — refusing to start")
+        raise SystemExit(1)
+
     run_startup_backtest_check()
 
     # ── Start DB run session ──────────────────────────────────────────────────
