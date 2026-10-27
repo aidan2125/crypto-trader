@@ -48,6 +48,11 @@ from alerts.discord_alerts import send_discord_message
 from data.last_signal_store import load_last_signals, save_last_signals
 from execution.enhanced_paper_trader import execute_paper_trade, summarize_paper_trades
 from execution.altcoin_trader import check_altcointrader_positions_for_exits
+from data.alpaca_crypto_coins import ALPACA_WALLET_COINS
+from execution.alpaca_crypto import (
+    execute_alpaca_crypto_trade, check_alpaca_crypto_exits,
+    summarize_alpaca_crypto, alpaca_supported,
+)
 from backtest.run_backtest_simple import BacktestPro
 from risk.dynamic_risk import load_enhanced_risk_config as load_config
 
@@ -250,9 +255,16 @@ def run_for_symbol(
         previous_signal = last_signals.get(cooldown_key)
 
         trade_result = None
+        trade_ok = True
         if current_signal != previous_signal:
             trade_result = execute_fn(symbol, current_signal, price, currency, atr, stop_loss, take_profit)
             print(f"  [trade] {symbol} sig={current_signal} -> {trade_result}")
+            if isinstance(trade_result, dict):
+                _msg = str(trade_result.get("message", "")).lower()
+                _final = ("already in position", "already holding", "no position",
+                          "no alpaca position", "max positions", "not available on alpaca")
+                trade_ok = (bool(trade_result.get("success", True)) or current_signal == 0
+                            or any(m in _msg for m in _final))
             if asset_type == "crypto" and isinstance(trade_result, dict) and not trade_result.get("quantity"):
                 print(f"  [skip] {symbol}: {trade_result.get('message', 'no action')}")
                 logging.info(f"{log_prefix}{symbol}: no trade executed ({trade_result.get('message')})")
@@ -273,7 +285,7 @@ def run_for_symbol(
             # "'str' object has no attribute 'get'" in logs/bot.log.
             # Real fix: make execute_paper_trade/execute_stock_trade always
             # return a dict. Tracked separately.
-            if isinstance(trade_result, dict):
+            if isinstance(trade_result, dict) and trade_result.get("success", True):
                 _direction = "LONG"  if current_signal == 1  else \
                              "SHORT" if current_signal == -1 else "FLAT"
                 _action    = "ENTRY" if current_signal in (1, -1) else "EXIT"
@@ -293,7 +305,7 @@ def run_for_symbol(
                     signal_quality = signal_quality,
                     strategy_mode  = strategy_mode,
                 )
-            elif trade_result:
+            elif trade_result and not isinstance(trade_result, dict):
                 # String result — still get it into trades.db, just without
                 # the structured numeric fields we can't pull out of a string.
                 _direction = "LONG"  if current_signal == 1  else \
@@ -323,10 +335,10 @@ def run_for_symbol(
             atr            = atr,
             signal_quality = signal_quality,
             strategy_mode  = strategy_mode,
-            acted_on       = trade_result is not None,
+            acted_on       = trade_result is not None and (not isinstance(trade_result, dict) or bool(trade_result.get('success', True))),
         )
 
-        if current_signal != previous_signal:
+        if current_signal != previous_signal and trade_ok:
             # ── Build & send alert ────────────────────────────────────────────
             signal_names = {-1: "SELL", 0: "HOLD", 1: "BUY"}
             signal_name  = signal_names.get(current_signal, str(current_signal))
@@ -363,7 +375,10 @@ def run_for_symbol(
             print(f"\n{message}\nAlerts: {alerts_sent}\n")
 
         else:
-            logging.info(f"{log_prefix}{symbol}: No change (signal {current_signal})")
+            if not trade_ok:
+                logging.info(f"{log_prefix}{symbol}: trade rejected, will retry next cycle (signal {current_signal})")
+            else:
+                logging.info(f"{log_prefix}{symbol}: No change (signal {current_signal})")
             _why = next((last_row[col][0] for col in last_row.columns if "reason" in col), None)
             print(f"  [hold] {symbol}: why={_why} signal={current_signal} unchanged (prev={previous_signal}) "
                   f"quality={signal_quality} sl={stop_loss} tp={take_profit} price={price}")
@@ -383,10 +398,15 @@ def run_for_coin(coin: str) -> None:
     timeframe = "4h" if any(x in coin for x in ["BTC", "ETH"]) else "1h"
 
     def _execute(symbol, signal, price, currency, atr, stop_loss, take_profit):
-        return execute_paper_trade(
+        result = execute_paper_trade(
             coin=symbol, signal=signal, price=price, currency=currency,
             atr=atr, stop_loss=stop_loss, take_profit=take_profit,
         )
+        try:
+            execute_alpaca_crypto_trade(symbol, signal, price, atr, stop_loss, take_profit)
+        except Exception as e:
+            logging.error(f"[alpaca-crypto] mirror failed for {symbol}: {e}")
+        return result
 
     run_for_symbol(
         coin,
@@ -432,6 +452,23 @@ def run_for_stock(ticker: str, risk_config: dict | None = None) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # CRYPTO position exit checker
 # ─────────────────────────────────────────────────────────────────────────────
+
+def run_for_alpaca_wallet_coin(coin: str) -> None:
+    def _execute(symbol, signal, price, currency, atr, stop_loss, take_profit):
+        return execute_alpaca_crypto_trade(symbol, signal, price, atr, stop_loss, take_profit)
+
+    run_for_symbol(
+        coin,
+        asset_type   = "crypto",
+        fetch_fn     = lambda: fetch_ohlcv(symbol=coin, timeframe="1h"),
+        currency     = "USD",
+        execute_fn   = _execute,
+        cooldown_key = f"ALPACA:{coin}",
+        field_label  = "Coin",
+        signal_title = "ALPACA PAPER SIGNAL",
+        log_prefix   = "[alpaca-crypto] ",
+    )
+
 
 def check_all_positions_for_exits():
     """
@@ -706,6 +743,14 @@ def main(continuous: bool = False, interval: int = 300):
 
                 print("\n→ Checking crypto positions for exits...")
                 check_all_positions_for_exits()
+
+                print("\n-> Alpaca paper crypto (wallet coins)...")
+                for coin in alpaca_supported(ALPACA_WALLET_COINS):
+                    print(f"-> {coin}")
+                    run_for_alpaca_wallet_coin(coin)
+                    time.sleep(1)
+                check_alpaca_crypto_exits(alert_fn=send_all_alerts)
+                summarize_alpaca_crypto()
 
                 print(f"\n{'='*70}")
                 summarize_paper_trades()
